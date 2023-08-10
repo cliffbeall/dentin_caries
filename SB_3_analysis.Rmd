@@ -1,0 +1,1244 @@
+---
+title: "SB3 Community Analysis"
+author: "cliffbeall"
+date: "11/30/2020"
+output: html_document
+---
+
+```{r setup}
+knitr::opts_chunk$set(echo = TRUE)
+require(readxl)
+require(vegan)
+require(ggplot2)
+require(dendextend)
+require(ggcorrplot)
+require(Hmisc)
+require(glmmTMB)
+require(coin)
+require(data.table)
+require(pheatmap)
+require(tidyverse)
+require(lme4)
+require(car)
+```
+
+## Load Data
+
+I saved the species counts tables in an .Rdata file in the first markdown of this analysis. The metadata is in an excel file from 
+
+```{r load_data}
+load(file = "SB_species.Rdata")
+sb.bact.spec.counts <- sb.bact.spec.counts[order(sb.bact.spec.counts$sample), ]
+row.names(sb.bact.spec.counts) <- as.character(sb.bact.spec.counts$sample)
+sb.bact.spec.counts <- sb.bact.spec.counts[, -1]
+sb.fung.spec.counts <- sb.fung.spec.counts[order(sb.fung.spec.counts$sample), ]
+row.names(sb.fung.spec.counts) <- as.character(sb.fung.spec.counts$sample)
+sb.fung.spec.counts <- sb.fung.spec.counts[, -1]
+raw.meta <- read_xlsx(path = "Book1.xlsx", sheet = "Original Sample List",
+                      col_names = c("Subject ID", "Inclusion", "Inclusion2", "Visit Date", "Age in mos.", "Gender", "Ethnicity1",
+                                    "Ethnicity2", "Ethnicity3", "Unknown1", "Unknown2", "Teeth", "Unknown3", "Unknown4",
+                                    "Unknown5", "Comment", "Experimental group"),
+                      col_types = c("numeric", "text", "text", "date", "numeric", rep("text", 4), rep("numeric", 6), "text", "text"))
+```
+
+## Data Summaries
+
+The bacterial data has `r dim(sb.bact.spec.counts)[1]` samples, as does the fungal. Check that the samples are the same (need to trim off the trailing character from the names). 
+
+```
+> all.equal(strtrim(sort(as.character(sb.bact.spec.counts$sample)), 8), strtrim(sort(as.character(sb.fung.spec.counts$sample)), 8))
+[1] TRUE
+```
+
+```{r munge_data}
+sb.samps <- strtrim(row.names(sb.bact.spec.counts), 8)
+nameparts <- unlist(strsplit(sb.samps, split = "-"))
+subject <- factor(nameparts[seq(from = 2, to = length(nameparts) - 1, by = 3)])
+group <- character(length(subject))
+subjnum <- as.numeric(as.character(subject))
+group[subjnum >= 100 & subjnum < 200] <- "Control"
+group[subjnum >= 200 & subjnum < 300] <- "Caries"
+sample.letter <- nameparts[seq(from = 3, to = length(nameparts), by = 3)]
+sampletype <- character(length(sample.letter))
+sampletype[group == "Control"] <- "Control"
+sampletype[group == "Caries" & sample.letter == "I"] <- "Intact"
+sampletype[sample.letter == "W"] <- "White Spot"
+sampletype[sample.letter == "C"] <- "Cavitated"
+sampletype[sample.letter == "D"] <- "Dentin"
+sampletype <- factor(sampletype, levels = c("Control", "Intact", "White Spot", "Cavitated", "Dentin"), ordered = TRUE)
+age <- numeric(length(subject))
+gender <- character(length(subject))
+ethnicity <- character(length(subject))
+for(i in 1:length(subject)){
+  j <- which(raw.meta$`Subject ID` == as.numeric(as.character(subject))[i])
+  age[i] <- raw.meta$`Age in mos.`[j]
+  gender[i] <- raw.meta$Gender[j]
+  ethnicity[i] <- raw.meta$Ethnicity3[j]
+}
+sb.meta <- data.frame(Sample = strtrim(row.names(sb.bact.spec.counts), 8),
+                      Subject = subject,
+                      Group = group,
+                      "Sample Type" = sampletype,
+                      Age = age,
+                      Gender = factor(gender),
+                      Ethnicity = factor(ethnicity))
+```
+
+## NMDS and PERMANOVA
+
+Visualize the fungal and bacterial communities by NMDS, then do PERMANOVAs.
+
+```{r chunk4}
+set.seed(3658)
+sb.bact.mds <- metaMDS(comm = decostand(sb.bact.spec.counts, method = "total"), trymax = 100, autotransform = FALSE)
+sb.fung.mds <- metaMDS(comm = decostand(sb.fung.spec.counts, method = "total"), trymax = 500, autotransform = FALSE)
+fivecolors <- c("lightblue", "green", "yellow", "orange", "red")
+sb.bact.mds.df <- cbind(sb.meta, NMDS1 = sb.bact.mds$points[, 1], NMDS2 = sb.bact.mds$points[, 2])
+ggplot(data = sb.bact.mds.df, aes(x = NMDS1, y = NMDS2, color = Sample.Type)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = fivecolors) +
+  theme_dark() +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nBacterial Communities", color = "Sample Type")
+
+sb.fung.mds.df <- cbind(sb.meta, NMDS1 = sb.fung.mds$points[, 1], NMDS2 = sb.fung.mds$points[, 2])
+ggplot(data = sb.fung.mds.df, aes(x = NMDS1, y = NMDS2, color = Sample.Type)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = fivecolors) +
+  theme_dark() +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nFungal Communities", color = "Sample Type")
+# Overall PERMANOVA bacteria
+adonis(decostand(sb.bact.spec.counts, method = "total") ~ sb.meta$Sample.Type, strata = sb.meta$Subject)
+# Overall PERMANOVA fungal
+adonis(decostand(sb.fung.spec.counts, method = "total") ~ sb.meta$Sample.Type, strata = sb.meta$Subject)
+# post hoc tests
+con.vs.intact <- sb.meta$Sample.Type %in% c("Control", "Intact")
+con.vs.ws <- sb.meta$Sample.Type %in% c("Control", "White Spot")
+con.vs.cav <- sb.meta$Sample.Type %in% c("Control", "Cavitated")
+con.vs.den <- sb.meta$Sample.Type %in% c("Control", "Dentin")
+intact.vs.ws <- sb.meta$Sample.Type %in% c("Intact", "White Spot")
+intact.vs.cav <- sb.meta$Sample.Type %in% c("Intact", "Cavitated")
+intact.vs.den <- sb.meta$Sample.Type %in% c("Intact", "Dentin")
+ws.vs.cav <- sb.meta$Sample.Type %in% c("White Spot", "Cavitated")
+ws.vs.den <- sb.meta$Sample.Type %in% c("White Spot", "Dentin")
+cav.vs.den <- sb.meta$Sample.Type %in% c("Cavitated", "Dentin")
+cont.comps <- list(con.vs.intact, con.vs.ws, con.vs.cav, con.vs.den)
+other.comps <- list(intact.vs.ws, intact.vs.cav, intact.vs.den, ws.vs.cav, ws.vs.den, cav.vs.den)
+for(comp in cont.comps){
+  writeLines(paste("======== Comparing", unique(sb.meta$Sample.Type[comp])[1], "to", unique(sb.meta$Sample.Type[comp])[2], "========"))
+  writeLines("Bacterial:")
+  print(adonis(decostand(sb.bact.spec.counts[comp, ], method = "total") ~ sb.meta$Sample.Type[comp]))
+  writeLines("Fungal:")
+  print(adonis(decostand(sb.fung.spec.counts[comp, ], method = "total") ~ sb.meta$Sample.Type[comp]))
+}
+for(comp in other.comps){
+  writeLines(paste("======== Comparing", unique(sb.meta$Sample.Type[comp])[1], "to", unique(sb.meta$Sample.Type[comp])[2], "========"))
+  writeLines("Bacterial:")
+  print(adonis(decostand(sb.bact.spec.counts[comp, ], method = "total") ~ sb.meta$Sample.Type[comp], strata = sb.meta$Subject[comp]))
+  writeLines("Fungal:")
+  print(adonis(decostand(sb.fung.spec.counts[comp, ], method = "total") ~ sb.meta$Sample.Type[comp], strata = sb.meta$Subject[comp]))  
+}
+bact.betadisper <- betadisper(d = vegdist(decostand(sb.bact.spec.counts, method = "total")), group = sb.meta$Sample.Type)
+anova(bact.betadisper)
+fung.betadisper <- betadisper(d = vegdist(decostand(sb.fung.spec.counts, method = "total")), group = sb.meta$Sample.Type)
+anova(fung.betadisper)
+```
+## Tabulated results
+p values lower left, R^2^ upper right
+
+### Bacterial
+Sample type: | Control |	Intact Enamel	| White Spot | Cavitated |	Dentin
+------------ | ------- | ------------- | ---------- | --------- | -------
+Control |	| 0.05783 |	0.02784 |	0.06316 |	0.11879
+Intact Enamel	| 0.002 | |	0.07254	| 0.07365	| 0.13569
+White Spot | 0.022 |	0.001 | |	0.03028 |	0.05743
+Cavitated |	0.001 |	0.001	| 0.001	| |	0.02455
+Dentin | 0.001 |	0.001 |	0.001 | 0.018	| |
+
+### Fungal
+Sample type: | Control |	Intact Enamel	| White Spot | Cavitated |	Dentin
+------------ | ------- | ------------- | ---------- | --------- | -------
+Control	 | | 0.02645 | 0.05509 | 0.0253 | 0.06435
+Intact Enamel | 0.027 | | 0.01894 | 0.01346 | 0.04034
+White Spot | 0.001 | 0.116 | | 0.01834 | 0.02192
+Cavitated | 0.062 | 0.277 | 0.071 | | 0.02137
+Dentin | 0.001 | 0.005 | 0.023 | 0.014 | | 
+
+## Treating Lesion as Continuous Variable
+
+Wanted to try this to try to see if it makes a difference. I am leaving out the controls.
+
+```{r}
+noncontrol <- sb.meta$Sample.Type != "Control"
+set.seed(3658)
+"PERMANOVAs for non-control samples"
+
+"Bacterial with lesion as a factor"
+adonis(decostand(sb.bact.spec.counts[noncontrol,], method = "total") ~ sb.meta$Sample.Type[noncontrol], 
+       strata = sb.meta$Subject[noncontrol])
+"Bacterial with lesion as a number"
+adonis(decostand(sb.bact.spec.counts[noncontrol,], method = "total") ~ as.numeric(sb.meta$Sample.Type[noncontrol]), 
+       strata = sb.meta$Subject[noncontrol])
+"Fungal with lesion as a factor"
+adonis(decostand(sb.fung.spec.counts[noncontrol, ], method = "total") ~ sb.meta$Sample.Type[noncontrol], 
+       strata = sb.meta$Subject[noncontrol])
+"Fungal with lesion as a number"
+adonis(decostand(sb.fung.spec.counts[noncontrol, ], method = "total") ~ as.numeric(sb.meta$Sample.Type[noncontrol]), 
+       strata = sb.meta$Subject[noncontrol])
+
+```
+
+
+## Clustering of the Fungal Communities
+
+I want to visualize the fungal communities as was done for the PF study oral rinse samples to see how they compare, and if these plaque samples similarly tend to have one fungus predominate.
+
+```{r}
+c25 <- c(
+  "dodgerblue2", "#E31A1C", # red
+  "green4",
+  "#6A3D9A", # purple
+  "#FF7F00", # orange
+  "black", "gold1",
+  "skyblue2", "#FB9A99", # lt pink
+  "palegreen2",
+  "#CAB2D6", # lt purple
+  "#FDBF6F", # lt orange
+  "gray70", "khaki2",
+  "maroon", "orchid1", "deeppink1", "blue1", "steelblue4",
+  "darkturquoise", "green1", "yellow4", "yellow3",
+  "darkorange4", "brown"
+)
+c16match <- c("#E31A1C", # red
+              "dodgerblue2",
+              "green4",
+              "#6A3D9A", # purple
+              "#FF7F00", # orange
+              "gold1",
+              "maroon",
+              "orchid1",
+              "deeppink1",
+              "#FB9A99", # lt pink
+              "#CAB2D6", # lt purple
+              "skyblue2",
+              "black",
+              "blue1",
+              "steelblue4",
+              "khaki2"
+              )
+sb.fung.spec.pct <- decostand(sb.fung.spec.counts, method = "total")
+sb.fung.spec.pct <- sb.fung.spec.pct[, order(colMeans(sb.fung.spec.pct), decreasing = TRUE)]
+sb.dist.fung <- vegdist(sb.fung.spec.pct)
+sb.hc.fung <- reorder(hclust(sb.dist.fung, method = "average"), wts = as.numeric(sb.meta$Sample.Type), agglo.FUN = "mean")
+sbfung.top.pct <- data.frame(sb.fung.spec.pct[, 1:15], Other = rowSums(sb.fung.spec.pct[, 16:170]))
+sbfung.top.pct <- sbfung.top.pct[sb.hc.fung$order, ]
+sbfung.stackbar.df <- data.frame(Samples = factor(rep(rownames(sbfung.top.pct), 16), levels = rownames(sbfung.top.pct)),
+                               Species = factor(rep(names(sbfung.top.pct), each = 171), levels = names(sbfung.top.pct)),
+                               Fraction = unlist(sbfung.top.pct))
+ggplot(data = sbfung.stackbar.df) +
+  geom_col(mapping = aes(x = Samples, y = Fraction, fill = Species)) +
+  scale_fill_manual(values = c16match) +
+  labs(title = "Fractional Abundance of Fungi") +
+  theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+plot(as.dendrogram(sb.hc.fung), leaflab = "none")
+colored_bars(colors = c("lightblue", "green", "yellow", "orange", "red")[sb.meta$Sample.Type[sb.hc.fung$order]], rowLabels = "Sample Type")
+```
+
+Upon examining the clustering, there seemed to be fewer samples where one fungus predominates in this data, compare to the markdown in the HIV mycobiome folder. I used the caries lesion severity (1 -5) to reorder the clustering to put the more severe lesions to the right. Visually it seems like the more severe lesions are more likely to be dominated by _C. albicans_ or more rarely _C. dubliniensis_ or _C. tropicalis_, while the ones with _S. cerevisiae_ or _Malassezia_ seem to be healthier.
+
+## Species correlations
+
+Doing bacteria and fungi together for simplicity. I probably really want to use SparCC or similar especially between fungi because of the compositional data.
+
+```{r correlations}
+sb.bact.frac <- decostand(sb.bact.spec.counts, method = "total")
+sb.fung.frac <- decostand(sb.fung.spec.counts, method = "total")
+sb.bactfung.top <- cbind(sb.bact.frac[, colMeans(sb.bact.frac) > 0.01], sb.fung.frac[, colMeans(sb.fung.frac) > 0.01])
+corr <- cor(sb.bactfung.top, method = "spearman")
+ggcorrplot(corr, tl.cex = 6)
+corr2 <- rcorr(as.matrix(sb.bactfung.top), type = "spearman")
+ggcorrplot(corr2$r[1:20, 21:35], p.mat = corr2$P[1:20, 21:35], title = "Spearman correlation of Relative Abundance", tl.cex = 8, pch.cex = 3)
+```
+
+_S. mutans_ is significantly negatively correlated with a few fungi including _Candidia xylopsoci_ and _Malassezia restricta_. _C. albicans_ is positively correlated with _Veillonella parvula_ group
+
+## Negative Binomial Mixed Models
+
+Run for the bacteria and fungi with mean abundance over 1%. One thing to note is that this will miss out some species that others have found associate with caries, for instance _Streptococcus sobrinus_, _Scardovia wiggsiae_, and various _Lactobacillus_. Those also appear to be highly caries associated in this study.
+
+Note: currently there is an error somewhere in this code and I think anyway we will try to incorporate the QPCR data before looking at species.
+
+```{r neg_binom, eval = FALSE}
+fung.offset <- rowSums(sb.fung.spec.counts)
+abund.fung <- which(colMeans(sb.fung.frac) > 0.01)
+fung.abund.nb.res <- vector(mode = "list", length = length(abund.fung))
+for(i in 1:length(abund.fung)){
+  mod <- glmmTMB(sb.fung.spec.counts[, i] ~ sb.meta$Sample.Type + (1 | sb.meta$Subject),
+                 family = nbinom2(link = "log"), ziformula = ~ 1,
+                 offset = log(fung.offset), na.action = na.omit)
+  fung.abund.nb.res[[i]] <- mod
+}
+sb.fung.nb.summ <- lapply(fung.abund.nb.res, summary)
+names(sb.fung.nb.summ) <- names(abund.fung)
+sb.fung.nb.summ
+bact.offset <- rowSums(sb.bact.spec.counts)
+abund.bact <- which(colMeans(sb.bact.frac) > 0.01)
+bact.abund.nb.res <- vector(mode = "list", length = length(abund.bact))
+for(i in 1:length(abund.bact)){
+  mod <- glmmTMB(sb.bact.spec.counts[, i] ~ sb.meta$Sample.Type + (1 | sb.meta$Subject),
+                 family = nbinom2(link = "log"), ziformula = ~ 1,
+                 offset = log(bact.offset), na.action = na.omit)
+  bact.abund.nb.res[[i]] <- mod
+}
+sb.bact.nb.summ <- lapply(bact.abund.nb.res, summary)
+names(sb.bact.nb.summ) <- names(abund.bact)
+sb.bact.nb.summ
+```
+
+Many of the models are not converging and getting strange results for others, including Strep mutans.
+
+## QPCR Data Incorporation
+
+Shahr had given me a number of different spreadsheets. The file "qPCR Bacterial and Fungal Samples had the numbers that I moved to another file without a lot of the additional stuff, I then read them in from that file.
+
+
+```{r}
+qpcr.bact <- read_xlsx(path = "Concise_QPCR.xlsx", sheet = "Bact", range = "A2:C172", col_names = c("Sample", "DNA_conc", "qPCR"))
+qpcr.fung <- read_xlsx(path = "Concise_QPCR.xlsx", sheet = "Fung", range = "A2:C172", col_names = c("Sample", "DNA_conc", "qPCR"))
+ggplot(data = qpcr.bact, mapping = aes(x = DNA_conc, y = qPCR)) +
+  geom_point() +
+  labs(title = "Bacterial DNA vs. Total", x = "Total DNA Conc., ng/ul", y = "Bacterial DNA, Pg genome equiv/ul") +
+  geom_smooth(method = lm, se = FALSE)
+ggplot(data = qpcr.fung, mapping = aes(x = DNA_conc, y = qPCR)) +
+  geom_point() +
+  labs(title = "Fungal DNA vs. Total", x = "Total DNA Conc., ng/ul", y = "Fungal DNA, Ca genome equiv/ul") +
+  geom_smooth(method = lm, se = FALSE)
+ggplot(data = qpcr.fung, mapping = aes(x = DNA_conc, y = qPCR)) +
+  geom_point() +
+  labs(title = "Fungal DNA vs. Total", x = "Total DNA Conc., ng/ul", y = "Fungal DNA, Ca genome equiv/ul") +
+  geom_smooth(method = lm, se = FALSE) +
+  scale_x_log10() +
+  scale_y_log10()
+# Check the sample lists are the same and in order:
+#> all.equal(sub("(SB_[0-9]+_.).", "\\1", qpcr.fung$Sample), sub("(SB_[0-9]+_.).", "\\1", qpcr.bact$Sample))
+#[1] TRUE
+all.qpcr <- data.frame(biosample = sub("(SB_[0-9]+_.).", "\\1", qpcr.bact$Sample),
+                       bact.prep.conc = qpcr.bact$DNA_conc,
+                       bact.qpcr = qpcr.bact$qPCR,
+                       fung.prep.conc = qpcr.fung$DNA_conc,
+                       fung.qpcr = qpcr.fung$qPCR)
+
+ggplot(data = all.qpcr, mapping = aes(x = bact.prep.conc, y = fung.prep.conc)) +
+  geom_point() +
+  labs(title = "Bacterial vs. Fungal DNA Prep Concs,\nSame Biosample", x = "Bacterial DNA prep, ng/ul", y = "Fungal DNA prep, ng/ul") +
+  geom_smooth(method = lm, se = FALSE)
+ggplot(data = all.qpcr, mapping = aes(x = bact.qpcr, y = fung.qpcr)) +
+  geom_point() +
+  labs(title = "Bacterial vs. Fungal DNA qPCR", x = "Bacterial DNA, Pg genome equiv/ul", y = "Fungal DNA, Ca genome equiv/ul") +
+  scale_x_log10() +
+  scale_y_log10()
+```
+## More Info on qPCR data
+
+Does the amount of fungi or bacteria vary by lesion type sampled or with age?
+
+Note: (added 2021-09-02) In initial work I noted that the bacterial DNA was higher in samples from intact enamel in the control than intact in the caries group. On a call Seth confirmed that 3 teeth were sampled in controls while 1 tooth was sampled in the caries. Therefore I am redoing the calculations dividing the control abundance numbers by 3.
+
+```{r}
+# The sample lists have the same numbers:
+dim(sb.meta)
+dim(qpcr.bact)
+dim(qpcr.fung)
+# Sample naming was inconsistent between dashes and underlines, also fungal versus bacterial have one letter different
+# but they are in the same order
+all.equal(gsub("-", "_", sb.meta$Sample), sub("(SB_[0-9]+_.).", "\\1", qpcr.bact$Sample))
+all.qpcr$Sample.Type <- sb.meta$Sample.Type
+all.qpcr$Age <- sb.meta$Age
+# Adjustment for number of teeth sampled:
+all.qpcr$bact.prep.conc[all.qpcr$Sample.Type == "Control"] <- all.qpcr$bact.prep.conc[all.qpcr$Sample.Type == "Control"] / 3
+all.qpcr$bact.qpcr[all.qpcr$Sample.Type == "Control"] <- all.qpcr$bact.qpcr[all.qpcr$Sample.Type == "Control"] / 3
+all.qpcr$fung.prep.conc[all.qpcr$Sample.Type == "Control"] <- all.qpcr$fung.prep.conc[all.qpcr$Sample.Type == "Control"] / 3
+all.qpcr$fung.qpcr[all.qpcr$Sample.Type == "Control"] <- all.qpcr$fung.qpcr[all.qpcr$Sample.Type == "Control"] / 3
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = bact.qpcr)) +
+  geom_boxplot() +
+  labs(title = "Bacterial quantity by sample type", x = "Sample Type", y = "Pg genome equiv/ul") +
+  scale_y_log10()
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = fung.qpcr)) +
+  geom_boxplot() +
+  labs(title = "Fungal quantity by sample type", x = "Sample Type", y = "Ca genome equiv/ul") +
+  scale_y_log10()
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = bact.qpcr)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.1) +
+  labs(title = "Bacterial quantity by sample type", x = "Sample Type", y = "Pg genome equiv/ul") +
+  scale_y_log10()
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = fung.qpcr)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.1) +
+  labs(title = "Fungal quantity by sample type", x = "Sample Type", y = "Ca genome equiv/ul") +
+  scale_y_log10()
+# Kruskal-Wallis, not really right because of repeated measures
+kruskal.test(bact.qpcr ~ Sample.Type, data = all.qpcr)
+kruskal.test(fung.qpcr ~ Sample.Type, data = all.qpcr)
+ggplot(data = all.qpcr, mapping = aes(x = Age, y = bact.qpcr)) +
+  geom_point() +
+  labs(title = "Bacterial quantity by age", x = "Age in months", y = "Pg genome equiv/ul") +
+  geom_smooth() +
+  scale_y_log10()
+ggplot(data = all.qpcr, mapping = aes(x = Age, y = fung.qpcr)) +
+  geom_point() +
+  labs(title = "Fungal quantity by age", x = "Age in months", y = "Ca genome equiv/ul") +
+  geom_smooth() +
+  scale_y_log10()
+```
+## Incorporate qPCR into species abundance
+
+Generate "absolute abundance" tables by multiplying relative abundance by the qPCR result. Presumably variation in sampling or DNA preparation will average out. Can then do PERMANOVA on that community matrix or use zero-inflated gaussian mixed models to look for species that change significantly.
+```{r}
+sb.bact.spec.pct <- decostand(sb.bact.spec.counts, method = "total")
+sb.bact.spec.abs <- apply(X = sb.bact.spec.pct, MARGIN = 2, FUN = function(x){ x * all.qpcr$bact.qpcr })
+sb.fung.spec.abs <- apply(X = sb.fung.spec.pct, MARGIN = 2, FUN = function(x){ x * all.qpcr$fung.qpcr })
+set.seed(3658)
+sb.bact.abs.mds <- metaMDS(sb.bact.spec.abs, autotransform = FALSE, trymax = 100)
+set.seed(3658)
+sb.fung.abs.mds <- metaMDS(sb.fung.spec.abs, autotransform = FALSE, trymax = 100)
+```
+Plotting the NMDSs
+```{r}
+fivecolors <- c("lightblue", "green", "yellow", "orange", "red")
+sb.bact.abs.mds.df <- cbind(sb.meta, NMDS1 = sb.bact.abs.mds$points[, 1], NMDS2 = sb.bact.abs.mds$points[, 2])
+ggplot(data = sb.bact.abs.mds.df, aes(x = NMDS1, y = NMDS2, color = Sample.Type)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = fivecolors) +
+  theme_dark() +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nBased on qPCR-adj. Bacterial Abundance", color = "Sample Type")
+sb.fung.abs.mds.df <- cbind(sb.meta, NMDS1 = sb.fung.abs.mds$points[, 1], NMDS2 = sb.fung.abs.mds$points[, 2])
+ggplot(data = sb.fung.abs.mds.df, aes(x = NMDS1, y = NMDS2, color = Sample.Type)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = fivecolors) +
+  theme_dark() +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nBased on qPCR-adj. Fungal Abundance", color = "Sample Type")
+```
+
+## PERMANOVA analyses for the qPCR adjusted data
+```{r}
+# Overall PERMANOVAs
+set.seed(3658)
+adonis(sb.bact.spec.abs ~ sb.meta$Sample.Type, strata = sb.meta$Subject)
+set.seed(3658)
+adonis(sb.fung.spec.abs ~ sb.meta$Sample.Type, strata = sb.meta$Subject)
+# post hoc tests
+# comparisons defined in chunk 4 above
+set.seed(3658)
+for(comp in cont.comps){
+  writeLines(paste("======== Comparing", unique(sb.meta$Sample.Type[comp])[1], "to", unique(sb.meta$Sample.Type[comp])[2], "========"))
+  writeLines("Bacterial:")
+  print(adonis(sb.bact.spec.abs[comp, ] ~ sb.meta$Sample.Type[comp]))
+  writeLines("Fungal:")
+  print(adonis(sb.fung.spec.abs[comp, ] ~ sb.meta$Sample.Type[comp]))
+}
+for(comp in other.comps){
+  writeLines(paste("======== Comparing", unique(sb.meta$Sample.Type[comp])[1], "to", unique(sb.meta$Sample.Type[comp])[2], "========"))
+  writeLines("Bacterial:")
+  print(adonis(sb.bact.spec.abs[comp, ] ~ sb.meta$Sample.Type[comp], strata = sb.meta$Subject[comp]))
+  writeLines("Fungal:")
+  print(adonis(sb.fung.spec.abs[comp, ] ~ sb.meta$Sample.Type[comp], strata = sb.meta$Subject[comp]))  
+}
+bact.abs.betadisper <- betadisper(d = vegdist(decostand(sb.bact.spec.abs, method = "total")), group = sb.meta$Sample.Type)
+anova(bact.abs.betadisper)
+fung.abs.betadisper <- betadisper(d = vegdist(decostand(sb.fung.spec.abs, method = "total")), group = sb.meta$Sample.Type)
+anova(fung.abs.betadisper)
+```
+## Tabulated results
+p values lower left, R^2^ upper right
+
+### Bacterial
+Sample type: | Control |	Intact Enamel	| White Spot | Cavitated |	Dentin
+------------ | ------- | ------------- | ---------- | --------- | -------
+Control | | 0.03378 | 0.02509 | 0.03889 | 0.08236
+Intact Enamel | 0.004 | | 0.03695 | 0.04461 | 0.08165
+White Spot | 0.022 | 0.001 | | 0.02974 | 0.05132
+Cavitated | 0.005 | 0.001 | 0.015 | | 0.3686
+Dentin | 0.001 | 0.001 | 0.001 | 0.003 | |
+
+### Fungal
+Sample type: | Control |	Intact Enamel	| White Spot | Cavitated |	Dentin
+------------ | ------- | ------------- | ---------- | --------- | -------
+Control | | 0.06321 | 0.07709 | 0.05416 | 0.06933
+Intact Enamel | 0.001 | | 0.1712 | 0.02848 | 0.06068
+White Spot | 0.001 | 0.126 | | 0.01866 | 0.03905
+Cavitated | 0.001 | 0.01 | 0.138 | | 0.02052
+Dentin | 0.001 | 0.001 | 0.001 | 0.119 | |
+
+## Species Level Changes in Absolute Abundance
+
+We actually have data for all blocks and groups in this study so one way to ask if there are species that vary in the absolute abundance is a Friedman test on only the subjects with caries. I could also combine that with Wilcoxon tests between the intact enamel samples of the two subject groups. Another way to go would be some kind of generalized linear mixed model, probably zero-inflated. Online I have seen suggestions to use either gamma distribution or Tweedie. I had a bit more success getting the Tweedie to run in glmmTMB, not sure how general that is.
+```{r}
+caries <- sb.meta$Group == "Caries"
+nz.bact <- colSums(sb.bact.spec.abs[caries, ]) > 0
+nspec <- sum(nz.bact)
+nz.fung <- colSums(sb.fung.spec.abs[caries, ]) > 0
+nfspec <- sum(nz.fung)
+sb.bact.fried.res <- data.frame(mean.intact = numeric(nspec), mean.whitespot = numeric(nspec),
+                                mean.cavitated = numeric(nspec), mean.dentin = numeric(nspec),
+                                statistic = numeric(nspec), p.value = numeric(nspec),
+                                row.names = colnames(sb.bact.spec.abs)[nz.bact])
+sb.fung.fried.res <- data.frame(mean.intact = numeric(nfspec), mean.whitespot = numeric(nfspec),
+                                mean.cavitated = numeric(nfspec), mean.dentin = numeric(nfspec),
+                                statistic = numeric(nfspec), p.value = numeric(nfspec),
+                                row.names = colnames(sb.fung.spec.abs)[nz.fung])
+for(i in 1:nspec){
+  test <- friedman.test(y = sb.bact.spec.abs[caries, which(nz.bact)[i]],
+                        groups = droplevels(sb.meta$Sample.Type[caries]), 
+                        blocks = droplevels(sb.meta$Subject[caries]))
+  sb.bact.fried.res$mean.intact[i] <- mean(sb.bact.spec.abs[sb.meta$Sample.Type == "Intact", which(nz.bact)[i]])
+  sb.bact.fried.res$mean.whitespot[i] <- mean(sb.bact.spec.abs[sb.meta$Sample.Type == "White Spot", which(nz.bact)[i]])
+  sb.bact.fried.res$mean.cavitated[i] <- mean(sb.bact.spec.abs[sb.meta$Sample.Type == "Cavitated", which(nz.bact)[i]])
+  sb.bact.fried.res$mean.dentin[i] <- mean(sb.bact.spec.abs[sb.meta$Sample.Type == "Dentin", which(nz.bact)[i]])
+  sb.bact.fried.res$statistic[i] <- test$statistic
+  sb.bact.fried.res$p.value[i] <- test$p.value
+}
+sb.bact.fried.res$q.value <- p.adjust(sb.bact.fried.res$p.value, method = "fdr")
+# write.table(x = sb.bact.fried.res, file = "bact_abs_fried.txt", sep = "\t", col.names = NA)
+for(i in 1:nfspec){
+   test <- friedman.test(y = sb.fung.spec.abs[caries, which(nz.fung)[i]],
+                        groups = droplevels(sb.meta$Sample.Type[caries]), 
+                        blocks = droplevels(sb.meta$Subject[caries]))
+  sb.fung.fried.res$mean.intact[i] <- mean(sb.fung.spec.abs[sb.meta$Sample.Type == "Intact", which(nz.fung)[i]])
+  sb.fung.fried.res$mean.whitespot[i] <- mean(sb.fung.spec.abs[sb.meta$Sample.Type == "White Spot", which(nz.fung)[i]])
+  sb.fung.fried.res$mean.cavitated[i] <- mean(sb.fung.spec.abs[sb.meta$Sample.Type == "Cavitated", which(nz.fung)[i]])
+  sb.fung.fried.res$mean.dentin[i] <- mean(sb.fung.spec.abs[sb.meta$Sample.Type == "Dentin", which(nz.fung)[i]])
+  sb.fung.fried.res$statistic[i] <- test$statistic
+  sb.fung.fried.res$p.value[i] <- test$p.value 
+}
+sb.fung.fried.res$q.value <- p.adjust(sb.fung.fried.res$p.value, method = "fdr")
+# write.table(x = sb.fung.fried.res, file = "fung_abs_fried.txt", sep = "\t", col.names = NA)
+```
+
+Out of `r nspec` bacterial species tested, `r sum(sb.bact.fried.res$p.value < 0.05)` had p values less than 0.05 and `r sum(sb.bact.fried.res$q.value < 0.05)` had q values less than 0.05.
+
+Out of `r nfspec` fungal species tested, `r sum(sb.fung.fried.res$p.value < 0.05)` had p values less than 0.05 and `r sum(sb.fung.fried.res$q.value < 0.05)` had q values less than 0.05.
+
+## Species Differences of Intact Enamel Between Caries-free and Caries-affected
+
+Do Wilcoxon tests on the absolute abundance in the two samples types.
+
+```{r}
+intact <- sb.meta$Sample.Type %in% c("Control", "Intact")
+nz.2.bact <- colSums(sb.bact.spec.abs[intact, ]) > 0
+nz.2.fung <- colSums(sb.fung.spec.abs[intact, ]) > 0
+sb.bact.wilcox.res <- data.frame(mean.control = numeric(sum(nz.2.bact)), mean.caries = numeric(sum(nz.2.bact)),
+                                 statistic = numeric(sum(nz.2.bact)), p.value = numeric(sum(nz.2.bact)),
+                                 row.names = colnames(sb.bact.spec.abs)[nz.2.bact])
+for(i in 1:sum(nz.2.bact)){
+  testobj <- wilcox_test(sb.bact.spec.abs[intact, which(nz.2.bact)[i]] ~ sb.meta$Sample.Type[intact])
+  sb.bact.wilcox.res$mean.control[i] <- mean(sb.bact.spec.abs[sb.meta$Sample.Type == "Control", which(nz.2.bact)[i]])
+  sb.bact.wilcox.res$mean.caries[i] <- mean(sb.bact.spec.abs[sb.meta$Sample.Type == "Intact", which(nz.2.bact)[i]])
+  sb.bact.wilcox.res$statistic[i] <- statistic(testobj)
+  sb.bact.wilcox.res$p.value[i] <- pvalue(testobj)
+}
+sb.bact.wilcox.res$q.value <- p.adjust(sb.bact.wilcox.res$p.value, method = "fdr")
+write.table(x = sb.bact.wilcox.res, file = "bact_abs_wilcox.txt", sep = "\t", col.names = NA)
+sb.fung.wilcox.res <- data.frame(mean.control = numeric(sum(nz.2.fung)), mean.caries = numeric(sum(nz.2.fung)),
+                                 statistic = numeric(sum(nz.2.fung)), p.value = numeric(sum(nz.2.fung)),
+                                 row.names = colnames(sb.fung.spec.abs)[nz.2.fung])
+for(i in 1:sum(nz.2.fung)){
+  testobj <- wilcox_test(sb.fung.spec.abs[intact, which(nz.2.fung)[i]] ~ sb.meta$Sample.Type[intact])
+  sb.fung.wilcox.res$mean.control[i] <- mean(sb.fung.spec.abs[sb.meta$Sample.Type == "Control", which(nz.2.fung)[i]])
+  sb.fung.wilcox.res$mean.caries[i] <- mean(sb.fung.spec.abs[sb.meta$Sample.Type == "Intact", which(nz.2.fung)[i]])
+  sb.fung.wilcox.res$statistic[i] <- statistic(testobj)
+  sb.fung.wilcox.res$p.value[i] <- pvalue(testobj)
+}
+sb.fung.wilcox.res$q.value <- p.adjust(sb.fung.wilcox.res$p.value, method = "fdr")
+write.table(x = sb.fung.wilcox.res, file = "fung_abs_wilcox.txt", sep = "\t", col.names = NA)
+```
+
+## 2021-08-20 Extended Analyses
+
+Following a discussion yesterday, came up with a few more things to look at - bubble plots, prevalence/abundance, single species plots of significant ones, a couple of other things:
+
+
+First, does the fungal qPCR value change by subject and does the DNA prep concentration by sample type reflect the qPCR by sample type (higher in control)?
+
+```{r}
+all.qpcr$subject <- factor(unlist(strsplit(all.qpcr$biosample, split = "_"))[seq(from = 2, to = 3 * nrow(all.qpcr), by = 3)])
+caries.qpcr <- droplevels(all.qpcr[all.qpcr$Sample.Type != "Control", ])
+ggplot(data = caries.qpcr, mapping = aes(x = subject, y = fung.qpcr)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.05) +
+  labs(title = "Fungal Quantity by Subject", x = "Subject", y = "Ca genome equiv/ul") +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  scale_y_log10()
+fourcolors <- c("green", "yellow", "orange", "red")
+ggplot(data = caries.qpcr, mapping = aes(x = subject, y = fung.qpcr, fill = Sample.Type)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.08) +
+  labs(title = "Fungal Quantity by Subject", x = "Subject", y = "Ca genome equiv/ul") +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  scale_fill_manual(values = fourcolors) +
+  scale_y_log10()
+friedman.test(fung.qpcr ~ subject | Sample.Type, data = caries.qpcr)
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = bact.prep.conc)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.5) +
+  labs(title = "DNA prep concentration by Sample Type", x = "Sample Type", y = "ng/ul")
+```
+
+Next, size the points in the NMDS by fungal concentrations. I think log transforming makes the most sense.
+
+```{r}
+sb.fung.abs.mds.df$C.albicans <-sb.fung.spec.abs[, which(colnames(sb.fung.spec.abs) == "Candida albicans")]
+sb.fung.abs.mds.df$C.dubliniensis <-sb.fung.spec.abs[, which(colnames(sb.fung.spec.abs) == "Candida dubliniensis")]
+sb.fung.abs.mds.df$log10.C.albicans <-log10(sb.fung.abs.mds.df$C.albicans)
+sb.fung.abs.mds.df$log10.C.dubliniensis <-log10(sb.fung.abs.mds.df$C.dubliniensis)
+ggplot(data = sb.fung.abs.mds.df, aes(x = MDS1, y = MDS2, color = Sample.Type)) +
+  geom_point(aes(size = C.albicans)) +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = fivecolors) +
+  theme_dark() +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nBased on qPCR-adj. Fungal Abundance", color = "Sample Type")
+ggplot(data = sb.fung.abs.mds.df, aes(x = MDS1, y = MDS2, color = Sample.Type)) +
+  geom_point(aes(size = C.dubliniensis)) +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = fivecolors) +
+  theme_dark() +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nBased on qPCR-adj. Fungal Abundance", color = "Sample Type")
+```
+
+# Prevalence versus abundance for fungi
+
+I took a quick look and saw there are some pretty surprising things with this. In absolute abundance there is one dentin sample from subject 210 that is a huge outlier and it is predominantly Candida tropicalis. It therefore comes out that that is the most abundant organism overall in all samples, though it's pretty much due to that one sample. Maybe the median abundance would be a better thing to look at. C. albicans is in every sample
+
+```{r}
+prev.fung <- apply(sb.fung.spec.abs, MARGIN = 2, FUN = function(x){sum(x > 0) / length(x)})
+top.spec.f <- factor(names(sort(prev.fung, decreasing = TRUE))[1:20], levels = names(sort(prev.fung, decreasing = TRUE))[1:20])
+mwp <- apply((sb.fung.spec.abs[, order(prev.fung, decreasing = TRUE)])[,1:20], MARGIN = 2, FUN = function(x) median(x[x > 0]))
+prevplot.df <- data.frame(Species = top.spec.f,
+                          Prevalence = sort(prev.fung, decreasing = TRUE)[1:20],
+                          Mean.Abundance = colMeans(sb.fung.spec.abs[, order(prev.fung, decreasing = TRUE)])[1:20],
+                          Median.when.Present = mwp)
+ggplot(data = prevplot.df, mapping = aes(x = Species, y = Prevalence)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+ggplot(data = prevplot.df, mapping = aes(x = Species, y = Mean.Abundance)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+ggplot(data = prevplot.df, mapping = aes(x = Species, y = Mean.Abundance)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  scale_y_log10()
+ggplot(data = prevplot.df, mapping = aes(x = Species, y = Median.when.Present)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+# Attempt to do as a boxplot:
+abs.box.fung.dt <- melt(as.data.table(sb.fung.spec.abs[, order(prev.fung, decreasing = TRUE)])[, 1:20],
+                        variable.name = "Species", value.name = "Abundance")
+ggplot(data = abs.box.fung.dt, mapping = aes(x = Species, y = Abundance)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+```
+
+## Similar analysis to above with bacteria
+
+```{r}
+prev.bact <- apply(sb.bact.spec.abs, MARGIN = 2, FUN = function(x){sum(x > 0) / length(x)})
+top.spec.b <- factor(names(sort(prev.bact, decreasing = TRUE))[1:20], levels = names(sort(prev.bact, decreasing = TRUE))[1:20])
+mwpbact <- apply((sb.bact.spec.abs[, order(prev.bact, decreasing = TRUE)])[,1:20], MARGIN = 2, FUN = function(x) median(x[x > 0]))
+prevplot.bact.df <- data.frame(Species = top.spec.b,
+                          Prevalence = sort(prev.bact, decreasing = TRUE)[1:20],
+                          Mean.Abundance = colMeans(sb.bact.spec.abs[, order(prev.bact, decreasing = TRUE)])[1:20],
+                          Median.when.Present = mwpbact)
+ggplot(data = prevplot.bact.df, mapping = aes(x = Species, y = Prevalence)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+ggplot(data = prevplot.bact.df, mapping = aes(x = Species, y = Mean.Abundance)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+ggplot(data = prevplot.bact.df, mapping = aes(x = Species, y = Mean.Abundance)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  scale_y_log10()
+ggplot(data = prevplot.bact.df, mapping = aes(x = Species, y = Median.when.Present)) +
+  geom_col() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+abs.box.bact.dt <- melt(as.data.table(sb.bact.spec.abs[, order(prev.bact, decreasing = TRUE)])[, 1:20],
+                        variable.name = "Species", value.name = "Abundance")
+ggplot(data = abs.box.bact.dt, mapping = aes(x = Species, y = Abundance)) +
+  geom_boxplot() +
+  scale_y_log10() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+```
+
+
+## Correlations between top 20 bacteria and fungi
+
+```{r}
+sb.abs.bactfung.top <- cbind((sb.bact.spec.abs[, order(prev.bact, decreasing = TRUE)])[, 1:20],
+                             (sb.fung.spec.abs[, order(prev.fung, decreasing = TRUE)])[, 1:20])
+corrabs1 <- cor(sb.abs.bactfung.top, method = "spearman")
+ggcorrplot(corrabs1, tl.cex = 6)
+corrabs2 <- rcorr(as.matrix(sb.abs.bactfung.top), type = "spearman")
+ggcorrplot(corrabs2$r[1:20, 21:40], p.mat = corrabs2$P[1:20, 21:40], title = "Spearman correlation of Absolute Abundance", tl.cex = 8, pch.cex = 3)
+```
+
+## Absolute Abundance Plots at Species Level
+
+Do on the major significant fungal species and some selected bacterial species
+```{r}
+dotplot.abs <- function(sp_vec, abund.mat){
+  plot.df <- data.frame(st = sb.meta$Sample.Type,
+                        abund = abund.mat[ , colnames(abund.mat) == sp_vec[1]], 
+                        sp = sp_vec[1])
+  for(i in 2:length(sp_vec)){
+    add.df <- data.frame(st = sb.meta$Sample.Type,
+                         abund = abund.mat[, colnames(abund.mat) == sp_vec[i]],
+                         sp = sp_vec[i])
+    plot.df <- rbind(plot.df, add.df)
+  }
+ggplot(data = plot.df, mapping = aes(x = st, y = abund)) +
+       geom_dotplot(binaxis = "y", binwidth = 0.1, stackdir = "center") +
+       labs(x = "Group", y = "Abs. Abundance", title = "Absolute Abundance (non-zero samples)") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       scale_y_log10() +
+       facet_grid(cols = vars(sp))
+}
+dotplot.abs(sp_vec = c("Candida albicans", "Candida dubliniensis", "Candida tropicalis"), abund.mat = sb.fung.spec.abs)
+dotplot.abs(sp_vec = c("Streptococcus mutans", "Streptococcus vestibularis salivarius", "Streptococcus parasanguinis"), abund.mat = sb.bact.spec.abs)
+dotplot.abs(sp_vec = c("Scardovia wiggsiae", "Veillonella atypica dispar parvula", "Lactobacillus casei rhamnosus"), abund.mat = sb.bact.spec.abs)
+dotplot.abs(sp_vec = c("Atopobium parvulum", "Parvimonas micra", "Dialister invisus"), abund.mat = sb.bact.spec.abs)
+```
+
+## Summing all Lactobacillus
+
+Ann suggested looking at Lactobacillus as the entire genus.
+
+```{r}
+lactob.abs <- rowSums(sb.bact.spec.abs[, grep("Lactobacillus", colnames(sb.bact.spec.abs))])
+friedman.test(y = lactob.abs[caries],
+              groups = droplevels(sb.meta$Sample.Type[caries]), 
+              blocks = droplevels(sb.meta$Subject[caries]))
+lactoplot.df <- data.frame(st = sb.meta$Sample.Type, ab = lactob.abs)
+ggplot(data = lactoplot.df, mapping = aes(x = st, y = ab)) +
+       geom_dotplot(binaxis = "y", binwidth = 0.1, stackdir = "center") +
+       labs(x = "Group", y = "Abs. Abundance", title = "Lactobacillus Absolute Abundance (non-zero samples)") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       scale_y_log10()
+```
+
+## 2021-09-09 Extend the Correlation Analysis
+
+Want to look at correlations between bacteria and fungi but for dentin samples only, or possibly other sample types. I may also want to change which species I look at, one possibility would be to restrict to ones that show significant changes by sample type, though that only really applies to the bacteria. After looking at a few things I decided to take the top 20 species in dentin plus a few other selected species with the top and compare with the top 10 fungi.
+
+```{r}
+colmeans.bact.dent <- colMeans(sb.bact.spec.abs[sb.meta$Sample.Type == "Dentin",])
+colmeans.fung.dent <- colMeans(sb.fung.spec.abs[sb.meta$Sample.Type == "Dentin",])
+extras <- c("Scardovia wiggsiae", "Streptococcus sobrinus", "Atopobium rimae", "Dialister invisus", "Parvimonas micra")
+sb.abs.bactfung.top.1 <- cbind(sb.bact.spec.abs[, order(colmeans.bact.dent, decreasing = TRUE)][, 1:20],
+                               sb.bact.spec.abs[, colnames(sb.bact.spec.abs) %in% extras],
+                               lactob.abs,
+                               sb.fung.spec.abs[, order(colmeans.fung.dent, decreasing = TRUE)][, 1:10])
+colnames(sb.abs.bactfung.top.1)[26] <- "Lactobacillus (all)"
+corrabs3 <- cor(sb.abs.bactfung.top.1[sb.meta$Sample.Type == "Dentin", ], method = "spearman")
+ggcorrplot(corrabs3, tl.cex = 6)
+
+corrabs5 <- rcorr(sb.abs.bactfung.top.1, type = "spearman")
+ggcorrplot(corrabs5$r[1:26, 27:36], p.mat = corrabs5$P[1:26, 27:36], 
+           title = "Spearman Correlation of Absolute Abundance in all Samples", tl.cex = 8, pch.cex = 3)
+
+corrabs4 <- rcorr(sb.abs.bactfung.top.1[sb.meta$Sample.Type == "Dentin", ], type = "spearman")
+ggcorrplot(corrabs4$r[1:26, 27:36], p.mat = corrabs4$P[1:26, 27:36], 
+           title = "Spearman Correlation of Absolute Abundance in Dentin", tl.cex = 8, pch.cex = 3)
+
+corrabs6 <- rcorr(sb.abs.bactfung.top.1[sb.meta$Sample.Type == "Cavitated", ], type = "spearman")
+ggcorrplot(corrabs6$r[1:26, 27:36], p.mat = corrabs6$P[1:26, 27:36], 
+           title = "Spearman correlation of Absolute Abundance in Cavitated", tl.cex = 8, pch.cex = 3)
+
+corrabs7 <- rcorr(sb.abs.bactfung.top.1[sb.meta$Sample.Type == "White Spot", ], type = "spearman")
+ggcorrplot(corrabs7$r[1:26, 27:36], p.mat = corrabs7$P[1:26, 27:36], 
+           title = "Spearman correlation of Absolute Abundance in White Spot", tl.cex = 8, pch.cex = 3)
+
+corrabs8 <- rcorr(sb.abs.bactfung.top.1[sb.meta$Sample.Type == "Intact", ], type = "spearman")
+ggcorrplot(corrabs8$r[1:26, 27:36], p.mat = corrabs8$P[1:26, 27:36], 
+           title = "Spearman correlation of Absolute Abundance in Intact", tl.cex = 8, pch.cex = 3)
+
+corrabs9 <- rcorr(sb.abs.bactfung.top.1[sb.meta$Sample.Type == "Control", ], type = "spearman")
+ggcorrplot(corrabs9$r[1:26, 27:36], p.mat = corrabs9$P[1:26, 27:36], 
+           title = "Spearman correlation of Absolute Abundance in Control", tl.cex = 8, pch.cex = 3)
+
+
+ggcorrplot(corr = corrabs5$r, p.mat = corrabs5$P, type = "lower", show.diag = FALSE,
+title = "Spearman Correlation of Absolute Abundance in all Samples", tl.cex = 8, pch.cex = 2)
+
+ggcorrplot(corrabs4$r, p.mat = corrabs4$P, type = "lower", show.diag = FALSE,
+           title = "Spearman Correlation of Absolute Abundance in Dentin", tl.cex = 8, pch.cex = 2)
+
+ggcorrplot(corrabs6$r, p.mat = corrabs6$P, type = "lower", show.diag = FALSE,
+           title = "Spearman Correlation of Absolute Abundance in Cavitated", tl.cex = 8, pch.cex = 2)
+
+ggcorrplot(corrabs7$r, p.mat = corrabs7$P, type = "lower", show.diag = FALSE,
+           title = "Spearman Correlation of Absolute Abundance in White Spot", tl.cex = 8, pch.cex = 2)
+
+ggcorrplot(corrabs8$r, p.mat = corrabs8$P, type = "lower", show.diag = FALSE,
+           title = "Spearman Correlation of Absolute Abundance in Intact Enamel from ECC", tl.cex = 8, pch.cex = 2)
+
+ggcorrplot(corrabs9$r, p.mat = corrabs9$P, type = "lower", show.diag = FALSE,
+           title = "Spearman Correlation of Absolute Abundance in Caries Free Enamel", tl.cex = 8, pch.cex = 2)
+```
+
+##Heatmap with Clustering
+
+To visualize the relationships between bacterial and fungal species. Because of the huge range of absolute abundances I want to log transform the data, but that will run into problems with zeros. I decided to add the minimal observed number to the zeros before taking the log. That turns out to be 0.0004 for the fungi and 1 for the bacteria.
+
+```{r}
+bact.sub <- sb.abs.bactfung.top.1[,1:26]
+fung.sub <- sb.abs.bactfung.top.1[,27:36]
+bact.sub[bact.sub == 0] <- 1
+fung.sub[fung.sub == 0] <- 0.0004
+sb.abs.bactfung.log <- log10(cbind(bact.sub, fung.sub))
+pheatmap(sb.abs.bactfung.log[sb.meta$Sample.Type == "Dentin",], fontsize_row = 5, main = "Clustering in Dentin Samples")
+pheatmap(sb.abs.bactfung.log[sb.meta$Sample.Type == "Dentin",], scale = "column", 
+         fontsize_row = 5, main = "Scaled Clustering in Dentin Samples")
+pheatmap(sb.abs.bactfung.log[sb.meta$Sample.Type == "Cavitated",], fontsize_row = 5, main = "Clustering in Cavitated Samples")
+pheatmap(sb.abs.bactfung.log[sb.meta$Sample.Type == "Cavitated",], scale = "column",
+         fontsize_row = 5, main = "Scaled Clustering in Cavitated Samples")
+pheatmap(sb.abs.bactfung.log[sb.meta$Sample.Type == "White Spot",], scale = "column",
+         fontsize_row = 5, main = "Scaled Clustering in White Spot Samples")
+pheatmap(sb.abs.bactfung.log[sb.meta$Sample.Type == "Intact",], scale = "column",
+         fontsize_row = 5, main = "Scaled Clustering in Intact Samples")
+pheatmap(sb.abs.bactfung.log, scale = "column", fontsize_row = 2, main = "Scaled Clustering in All Samples")
+pheatmap(sb.abs.bactfung.log[sb.meta$Sample.Type == "Control", -c(13, 25)], scale = "column",
+         fontsize_row = 5, main = "Scaled Clustering in Caries-free Samples")
+```
+
+## What species might be in SEM pictures?
+
+Rosalyn had some SEM pictures showing apparent bacteria in the tubules. I want to try to figure out what they might be. I have some hints from the abundance/prevalence analysis but that was looking at all the samples. The species level graphs give more info but that is only for a few species. So what I will do first is look at dentin only, then graph the abundance of the top 10 or 20 mean abundance species in dentin. I will do something similar for fungi thinking that will be mostly the two Candida species.
+
+```{r}
+sb.bact.dent.abs <- sb.bact.spec.abs %>%
+  as_tibble() %>%
+  filter(sb.meta$Sample.Type == "Dentin")
+top_20_bact <- names(sort(colMeans(sb.bact.dent.abs), decreasing = TRUE)[1:20])
+
+sb.bact.dent.abs %>%
+  select(all_of(top_20_bact)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Species",
+               values_to = "Abundance") %>%
+  mutate(Species = factor(Species, levels = top_20_bact)) %>%
+ggplot(mapping = aes(x = Species, y = Abundance)) +
+       geom_dotplot(binaxis = "y", binwidth = 0.1, stackdir = "center") +
+       labs(title = "Absolute Abundance in Dentin (non-zero samples)") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       scale_y_log10()
+
+sb.bact.dent.abs %>%
+  select(all_of(top_20_bact)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Species",
+               values_to = "Abundance") %>%
+  mutate(Species = factor(Species, levels = top_20_bact)) %>%
+ggplot(mapping = aes(x = Species, y = Abundance)) +
+       geom_dotplot(binaxis = "y", binwidth = 100000, stackdir = "center") +
+       labs(title = "Absolute Abundance in Dentin") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+
+sb.fung.dent.abs <- sb.fung.spec.abs %>%
+  as_tibble() %>%
+  filter(sb.meta$Sample.Type == "Dentin")
+top_10_fung <- names(sort(colMeans(sb.fung.dent.abs), decreasing = TRUE)[1:10])
+
+sb.fung.dent.abs %>%
+  select(all_of(top_10_fung)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Species",
+               values_to = "Abundance") %>%
+  mutate(Species = factor(Species, levels = top_10_fung)) %>%
+ggplot(mapping = aes(x = Species, y = Abundance)) +
+       geom_dotplot(binaxis = "y", binwidth = 0.2, stackdir = "center") +
+       labs(title = "Absolute Abundance in Dentin (non-zero samples)") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       scale_y_log10()
+
+sb.fung.dent.abs %>%
+  select(all_of(top_10_fung)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Species",
+               values_to = "Abundance") %>%
+  mutate(Species = factor(Species, levels = top_10_fung)) %>%
+ggplot(mapping = aes(x = Species, y = Abundance)) +
+       geom_dotplot(binaxis = "y", binwidth = 10000, stackdir = "center") +
+       labs(title = "Absolute Abundance in Dentin") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+## Stacked Bar of Dentin Samples
+
+I have strong indications that about half of the carious dentin samples have high abundance of fungi and that many of those are dominated by C. albicans or C. dubliniensis but I am going to try to make a few stacked bar plots to show that more clearly.
+
+I am going to use the same species I used for all the samples to make things comparable
+
+```{r}
+cluster_stack_sb <- function(samples){
+  pctdf <- sb.fung.spec.pct[rownames(sb.fung.spec.pct) %in% samples, ]
+  dis <- vegdist(pctdf)
+  hc <- hclust(dis, method = "average")
+  top_pctdf <- data.frame(pctdf[ , 1:15], Other = rowSums(pctdf[ , 16:ncol(pctdf)]))
+  top_pctdf <- top_pctdf[hc$order, ]
+  stackbar_df <- data.frame(Samples = factor(rep(rownames(top_pctdf), 16), levels = rownames(top_pctdf)),
+                            Species = factor(rep(names(top_pctdf), each = nrow(top_pctdf)), levels = names(top_pctdf)),
+                            Fraction = unlist(top_pctdf)
+                            )
+  sbplot <- ggplot(data = stackbar_df) +
+    geom_col(mapping = aes(x = Samples, y = Fraction, fill = Species)) +
+   scale_fill_manual(values = c16match) +
+   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+  sbplot
+}
+# Test to make sure it reproduces the original graph, ordering a bit different because I reordered the dendrogram in that one
+gg <- cluster_stack_sb(rownames(sb.fung.spec.pct))
+gg + labs(title = "All Sample Test")
+
+ggdent <- cluster_stack_sb(rownames(sb.fung.spec.pct[sb.meta$Sample.Type == "Dentin", ]))
+ggdent + labs(title = "All Dentin Samples")
+
+denthi <- sb.meta$Sample.Type == "Dentin" & all.qpcr$fung.qpcr > 1000
+ggdenthi <- cluster_stack_sb(rownames(sb.fung.spec.pct[denthi , ]))
+ggdenthi + labs(title = "Dentin Samples with High Fungus")
+```
+
+## Comparison to Rosalyn Data
+
+Ann and Rosalyn were looking at the data from samples that Ros had collected and we sequenced in 2022-12, they are labeled BAC and MYC. They are of dentin samples and Ann thought the composition might be different from ours based on stack bar graphs of the fungi and bacteria, done in quite a different way than these ones. I said I would look at stacked bars, and do NMDS/PERMANOVAs to check on this. I copied the data over from the project rs_2022_12_run in the files rs_2022_12_fung_counts.Rdata and bac_spec_counts.Rdata.
+
+```{r comparisons_to_rosalyns}
+load(file = "rs_2022_12_fung_counts.Rdata")
+load(file = "bac_spec_counts.Rdata")
+# Comparable stacked bar graph on fungi
+# Modify the function
+cluster_stack <- function(samples, inputdf){
+  pctdf <- inputdf[rownames(inputdf) %in% samples, ]
+  dis <- vegdist(pctdf)
+  hc <- hclust(dis, method = "average")
+  top_pctdf <- data.frame(pctdf[ , 1:15], Other = rowSums(pctdf[ , 16:ncol(pctdf)]))
+  top_pctdf <- top_pctdf[hc$order, ]
+  stackbar_df <- data.frame(Samples = factor(rep(rownames(top_pctdf), 16), levels = rownames(top_pctdf)),
+                            Species = factor(rep(names(top_pctdf), each = nrow(top_pctdf)), levels = names(top_pctdf)),
+                            Fraction = unlist(top_pctdf)
+                            )
+  sbplot <- ggplot(data = stackbar_df) +
+    geom_col(mapping = aes(x = Samples, y = Fraction, fill = Species)) +
+   scale_fill_manual(values = c16match) +
+   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank())
+  sbplot
+}
+# To make colors correspond, arrange the data frame in same order
+# One species was missing, add back
+rs_myc_pct <- rs_2022_12_fung_counts[, -1] %>%
+  mutate(`Cyberlindnera jadinii` = rep(0, nrow(rs_2022_12_fung_counts))) %>%
+  decostand(method = "total") %>%
+  relocate(names(sb.fung.spec.pct)[1:15])
+rownames(rs_myc_pct) <- rs_2022_12_fung_counts$Sample
+rs_exp_deep <- str_subset(rownames(rs_myc_pct), "FMYC-EXP-[0-9]+-DEEP")
+rs_exp_sup <- str_subset(rownames(rs_myc_pct), "FMYC-EXP-[0-9]+-SUP")
+gg <- cluster_stack(rs_exp_deep, rs_myc_pct)
+gg + labs(title = "BCH Deep Dentin Samples")
+gg <- cluster_stack(rs_exp_sup, rs_myc_pct)
+gg + labs(title = "BCH Superficial Dentin Samples")
+# NMDS and PERMANOVAs
+sb_fung_dent_counts <- sb.fung.spec.counts %>%
+  mutate(Sample = sb.meta$Sample) %>%
+  relocate(Sample) %>%
+  filter(sb.meta$Sample.Type == "Dentin") %>%
+  as_tibble()
+rs2022_fung_dent_counts <- rs_2022_12_fung_counts %>%
+  filter(Sample %in% c(rs_exp_deep, rs_exp_sup)) %>%
+  as_tibble()
+
+comb_dentin_fung_counts <- full_join(sb_fung_dent_counts, rs2022_fung_dent_counts) %>%
+  replace(is.na(.), 0)
+
+sample_groups <- character(nrow(comb_dentin_fung_counts))
+sample_groups[str_detect(comb_dentin_fung_counts$Sample, "^SB")] <- "SB Dentin"
+sample_groups[str_detect(comb_dentin_fung_counts$Sample, "DEEP$")] <- "RS Deep Dentin"
+sample_groups[str_detect(comb_dentin_fung_counts$Sample, "SUP$")] <- "RS Superficial Dentin"
+set.seed(3658)
+comb_fung_dentin_nmds <- metaMDS(decostand(comb_dentin_fung_counts[,-1], method = "total"), 
+                            trymax = 200, 
+                            autotransform = FALSE
+                            )
+comb_fung_dentin_gg <- cbind(data.frame(Sample = comb_dentin_fung_counts$Sample, SampleGroups = sample_groups),
+                             scores(comb_fung_dentin_nmds, display = "sites")
+                             )
+ggplot(comb_fung_dentin_gg, aes(x = NMDS1, y = NMDS2, color = SampleGroups)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = c("orchid1", "skyblue2", "gold1")) +
+  theme_dark() +
+  labs(title = "NMDS of Fungal Samples", color = "Sample Type")
+
+ggplot(comb_fung_dentin_gg, aes(x = NMDS1, y = NMDS2, label = Sample)) +
+  geom_text(size = 2) +
+  coord_fixed() +
+  labs(title = "NMDS of Fungal Samples", color = "Sample Type")
+
+
+adonis(decostand(comb_dentin_fung_counts[,-1], method = "total") ~ factor(sample_groups))
+beta <- betadisper(vegdist(decostand(comb_dentin_fung_counts[,-1], method = "total")), group = sample_groups)
+anova(beta)
+
+# Bacterial Data
+
+sb_bact_dent_counts <- sb.bact.spec.counts %>%
+  mutate(Sample = sb.meta$Sample) %>%
+  relocate(Sample) %>%
+  filter(sb.meta$Sample.Type == "Dentin") %>%
+  as_tibble()
+bac_exp_dent <- str_subset(bac_spec_counts$Sample, "BAC-EXP-[0-9]+-(DEEP|SUP)")
+
+rs2022_bact_dent_counts <- bac_spec_counts %>%
+  filter(Sample %in% bac_exp_dent) %>%
+  as_tibble()
+
+comb_dentin_bact_counts <- full_join(sb_bact_dent_counts, rs2022_bact_dent_counts) %>%
+  replace(is.na(.), 0)
+
+bact_sample_groups <- character(nrow(comb_dentin_bact_counts))
+bact_sample_groups[str_detect(comb_dentin_bact_counts$Sample, "^SB")] <- "SB Dentin"
+bact_sample_groups[str_detect(comb_dentin_bact_counts$Sample, "DEEP$")] <- "RS Deep Dentin"
+bact_sample_groups[str_detect(comb_dentin_bact_counts$Sample, "SUP$")] <- "RS Superficial Dentin"
+set.seed(3658)
+comb_bact_dentin_nmds <- metaMDS(decostand(comb_dentin_bact_counts[,-1], method = "total"), 
+                            trymax = 200, 
+                            autotransform = FALSE
+                            )
+comb_bact_dentin_gg <- cbind(data.frame(Sample = comb_dentin_bact_counts$Sample, SampleGroups = bact_sample_groups),
+                             scores(comb_bact_dentin_nmds, display = "sites")
+                             )
+ggplot(comb_bact_dentin_gg, aes(x = NMDS1, y = NMDS2, color = SampleGroups)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = c("orchid1", "skyblue2", "gold1")) +
+  theme_dark() +
+  labs(title = "NMDS of Bacterial Samples", color = "Sample Type")
+
+ggplot(comb_bact_dentin_gg, aes(x = NMDS1, y = NMDS2, label = Sample)) +
+  geom_text(size = 2) +
+  coord_fixed() +
+  labs(title = "NMDS of Bacterial Samples", color = "Sample Type")
+
+
+adonis(decostand(comb_dentin_bact_counts[,-1], method = "total") ~ factor(bact_sample_groups))
+```
+
+So the deep and superficial dentin doesn't appear to be much different in Rosalyn's study but both seem ot be different from Seth's samples and in a fairly consistent way as seen by bacterial and fungal composition. I will also look at the samples that say -PLA and compare them to the cavitated samples from Seth's study.
+
+One more redo of these plots. I want to change the list of species to look at the top 15 in a set of samples including SB's cavitated and dentin and Rosalyn's plaque, deep, and superficial dentin. I can use the same function that I used previously though I might also try to add the sample names.
+
+```{r}
+cluster_stack_samp <- function(samples, inputdf){
+  pctdf <- inputdf[rownames(inputdf) %in% samples, ]
+  dis <- vegdist(pctdf)
+  hc <- hclust(dis, method = "average")
+  top_pctdf <- data.frame(pctdf[ , 1:15], Other = rowSums(pctdf[ , 16:ncol(pctdf)]))
+  top_pctdf <- top_pctdf[hc$order, ]
+  stackbar_df <- data.frame(Samples = factor(rep(rownames(top_pctdf), 16), levels = rownames(top_pctdf)),
+                            Species = factor(rep(names(top_pctdf), each = nrow(top_pctdf)), levels = names(top_pctdf)),
+                            Fraction = unlist(top_pctdf)
+                            )
+  sbplot <- ggplot(data = stackbar_df) +
+    geom_col(mapping = aes(x = Samples, y = Fraction, fill = Species)) +
+   scale_fill_manual(values = c16match) +
+   theme(axis.text.x = element_text(angle = 90), axis.ticks.x = element_blank())
+  sbplot
+}
+
+sb_subset_counts <- sb.fung.spec.counts[sb.meta$Sample.Type %in% c("Cavitated", "Dentin"), ] %>%
+  mutate(Sample = sb.meta$Sample[sb.meta$Sample.Type %in% c("Cavitated", "Dentin")]) %>%
+  relocate(Sample)
+rs_subset_counts <- rs_2022_12_fung_counts[str_detect(rs_2022_12_fung_counts$Sample, "^FMYC-EXP"), ]
+
+comb_fung_subset_counts <- full_join(sb_subset_counts, rs_subset_counts) %>%
+  replace(is.na(.), 0)
+comb_fung_subset_pct <- comb_fung_subset_counts[, -1] %>%
+  decostand(method = "total")
+comb_fung_subset_pct <- comb_fung_subset_pct[, order(colMeans(comb_fung_subset_pct), decreasing = TRUE)]
+rownames(comb_fung_subset_pct) <- comb_fung_subset_counts$Sample
+
+sb_cav <- str_subset(comb_fung_subset_counts$Sample, "^SB-.*-C$")
+gg1 <- cluster_stack_samp(sb_cav, comb_fung_subset_pct)
+gg1 + labs(title = "Fungal Composition of SB Cavitated Samples")
+sb_dent <- str_subset(comb_fung_subset_counts$Sample, "^SB-.*-D$")
+gg2 <- cluster_stack_samp(sb_dent, comb_fung_subset_pct)
+gg2 + labs(title = "Fungal Composition of SB Dentin Samples")
+rs_pla <- str_subset(comb_fung_subset_counts$Sample, "^FMYC-.*-PLA$")
+gg3 <- cluster_stack_samp(rs_pla, comb_fung_subset_pct)
+gg3 + labs(title = "Fungal Composition of RS Plaque Samples")
+rs_sup <- str_subset(comb_fung_subset_counts$Sample, "^FMYC-.*-SUP$")
+gg4 <- cluster_stack_samp(rs_sup, comb_fung_subset_pct)
+gg4 + labs(title = "Fungal Composition of RS Superficial Samples")
+rs_deep <- str_subset(comb_fung_subset_counts$Sample, "^FMYC-.*-DEEP$")
+gg5 <- cluster_stack_samp(rs_deep, comb_fung_subset_pct)
+gg5 + labs(title = "Fungal Composition of RS Deep Samples")
+```
+
+
+```{r}
+sb_fung_cav_counts <- sb.fung.spec.counts %>%
+  mutate(Sample = sb.meta$Sample) %>%
+  relocate(Sample) %>%
+  filter(sb.meta$Sample.Type == "Cavitated") %>%
+  as_tibble()
+pla_exp <- str_subset(rs_2022_12_fung_counts$Sample, "FMYC-EXP-[0-9]+-PLA")
+rs2022_fung_cav_counts <- rs_2022_12_fung_counts %>%
+  filter(Sample %in% pla_exp) %>%
+  as_tibble()
+
+comb_cav_fung_counts <- full_join(sb_fung_cav_counts, rs2022_fung_cav_counts) %>%
+  replace(is.na(.), 0)
+
+cav_sample_groups <- character(nrow(comb_cav_fung_counts))
+cav_sample_groups[str_detect(comb_cav_fung_counts$Sample, "^SB")] <- "SB Cavitated"
+cav_sample_groups[str_detect(comb_cav_fung_counts$Sample, "^FMYC")] <- "RS Plaque"
+
+set.seed(3658)
+comb_fung_cav_nmds <- metaMDS(decostand(comb_cav_fung_counts[,-1], method = "total"), 
+                            trymax = 200, 
+                            autotransform = FALSE
+                            )
+comb_fung_cav_gg <- cbind(data.frame(Sample = comb_cav_fung_counts$Sample, SampleGroup = cav_sample_groups),
+                             scores(comb_fung_cav_nmds, display = "sites")
+                             )
+ggplot(comb_fung_cav_gg, aes(x = NMDS1, y = NMDS2, color = SampleGroup)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = c("#CAB2D6", "#FDBF6F")) +
+  theme_dark() +
+  labs(title = "NMDS of Fungal Samples", color = "Sample Type")
+
+ggplot(comb_fung_cav_gg, aes(x = NMDS1, y = NMDS2, label = Sample)) +
+  geom_text(size = 2) +
+  coord_fixed() +
+  labs(title = "NMDS of Fungal Samples")
+
+
+adonis(decostand(comb_cav_fung_counts[,-1], method = "total") ~ factor(cav_sample_groups))
+
+# Bacterial Data
+
+sb_bact_cav_counts <- sb.bact.spec.counts %>%
+  mutate(Sample = sb.meta$Sample) %>%
+  relocate(Sample) %>%
+  filter(sb.meta$Sample.Type == "Cavitated") %>%
+  as_tibble()
+bac_exp_cav <- str_subset(bac_spec_counts$Sample, "BAC-EXP-[0-9]+-PLA")
+
+rs2022_bact_cav_counts <- bac_spec_counts %>%
+  filter(Sample %in% bac_exp_cav) %>%
+  as_tibble()
+
+comb_cav_bact_counts <- full_join(sb_bact_cav_counts, rs2022_bact_cav_counts) %>%
+  replace(is.na(.), 0)
+
+bact_cav_sample_groups <- character(nrow(comb_cav_bact_counts))
+bact_cav_sample_groups[str_detect(comb_cav_bact_counts$Sample, "^SB")] <- "SB Cavitated"
+bact_cav_sample_groups[str_detect(comb_cav_bact_counts$Sample, "^BAC")] <- "RS Plaque"
+
+set.seed(3658)
+comb_bact_cav_nmds <- metaMDS(decostand(comb_cav_bact_counts[,-1], method = "total"), 
+                            trymax = 200, 
+                            autotransform = FALSE
+                            )
+comb_bact_cav_gg <- cbind(data.frame(Sample = comb_cav_bact_counts$Sample, SampleGroups = bact_cav_sample_groups),
+                             scores(comb_bact_cav_nmds, display = "sites")
+                             )
+ggplot(comb_bact_cav_gg, aes(x = NMDS1, y = NMDS2, color = SampleGroups)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  scale_color_manual(values = c("#CAB2D6", "#FDBF6F")) +
+  theme_dark() +
+  labs(title = "NMDS of Bacterial Samples", color = "Sample Type")
+
+ggplot(comb_bact_cav_gg, aes(x = NMDS1, y = NMDS2, label = Sample)) +
+  geom_text(size = 2) +
+  coord_fixed() +
+  labs(title = "NMDS of Bacterial Samples")
+
+adonis(decostand(comb_cav_bact_counts[,-1], method = "total") ~ factor(bact_cav_sample_groups))
+```
+
+
+## Compare Ratio of Fungi to Bacteria in Different Caries Stages
+
+To confirm that it's higher in dentin than other places
+
+```{r}
+all.qpcr <- all.qpcr %>%
+  mutate(fb.ratio = fung.qpcr / bact.qpcr)
+avg_ratios <- all.qpcr %>%
+  group_by(Sample.Type) %>%
+  summarize(avg_ratio = mean(fb.ratio))
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = fb.ratio)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.1) +
+  labs(title = "Ratio of Fungus to Bacteria by Sample Type", x = "Sample Type", y = "Ratio") +
+  scale_y_log10() +
+  geom_segment(aes(x = 0.7, y = avg_ratios$avg_ratio[1], xend = 1.3, yend = avg_ratios$avg_ratio[1]), color = "red") +
+  geom_segment(aes(x = 1.7, y = avg_ratios$avg_ratio[2], xend = 2.3, yend = avg_ratios$avg_ratio[2]), color = "red") +
+  geom_segment(aes(x = 2.7, y = avg_ratios$avg_ratio[3], xend = 3.3, yend = avg_ratios$avg_ratio[3]), color = "red") +
+  geom_segment(aes(x = 3.7, y = avg_ratios$avg_ratio[4], xend = 4.3, yend = avg_ratios$avg_ratio[4]), color = "red") +
+  geom_segment(aes(x = 4.7, y = avg_ratios$avg_ratio[5], xend = 5.3, yend = avg_ratios$avg_ratio[5]), color = "red")
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = fb.ratio)) +
+  geom_boxplot() +
+  labs(title = "Ratio of Fungus to Bacteria by Sample Type", x = "Sample Type", y = "Ratio") +
+  scale_y_log10()
+caries.qpcr <- caries.qpcr %>%
+    mutate(fb.ratio = fung.qpcr / bact.qpcr)
+friedman.test(fb.ratio ~ Sample.Type | subject, data = caries.qpcr)
+Anova(lmer(log(fb.ratio) ~ Sample.Type + (1 | subject), data = caries.qpcr))
+```
+
+```{r}
+sb.meta.dent <- sb.meta %>%
+  mutate(fung.qpcr = all.qpcr$fung.qpcr) %>%
+  filter(Sample.Type == "Dentin")
+sb.meta.dent$fung_cat <- rep("< 1000/ul", nrow(sb.meta.dent))
+sb.meta.dent$fung_cat[sb.meta.dent$fung.qpcr > 1000] <- "> 1000/ul"
+sb.meta.dent$fung_cat <- factor(sb.meta.dent$fung_cat, levels = c("< 1000/ul", "> 1000/ul"))
+sb.bact.dent.pct <- sb.bact.spec.pct %>%
+  filter(sb.meta$Sample.Type == "Dentin")
+set.seed(3658)
+adonis(sb.bact.dent.pct ~ fung.qpcr, data = sb.meta.dent)
+adonis(sb.bact.dent.pct ~ fung_cat, data = sb.meta.dent)
+bact.dent.nmds <- metaMDS(sb.bact.dent.pct, autotransform = FALSE, trymax = 200)
+dent.bact.nmds.plotdf <- cbind(sb.meta.dent, NMDS1 = bact.dent.nmds$points[, 1], NMDS2 = bact.dent.nmds$points[, 2])
+ggplot(dent.bact.nmds.plotdf, aes(x = NMDS1, y = NMDS2, color = fung_cat)) +
+  geom_point() +
+  coord_fixed() +
+  stat_ellipse() +
+  labs(title = "NMDS of Bacterial Communities in Carious Dentin", color = "Fungal Abundance")
+```
+
+
+## Further Visualizations 2023-04-20
+
+There were a couple of other things that were mentioned as possible figures for the paper. One was do a graph by subject, which I had done with the fungal qpcr number, but want to do with the ratio number to bacteria. Another is to do stacked bar graphs for the bacteria in dentin. Another is to look at the Friedman test p values for those fungi.
+
+```{r}
+ggplot(data = caries.qpcr, mapping = aes(x = subject, y = fb.ratio, fill = Sample.Type)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.08) +
+  labs(title = "Ratio of Fungi to Bacteria by Subject", x = "Subject", y = "Ca genome equiv/ul") +
+  scale_x_discrete(guide = guide_axis(angle = 90)) +
+  scale_fill_manual(values = fourcolors) +
+  scale_y_log10()
+sb <- cluster_stack_samp(rownames(sb.bact.dent.pct), sb.bact.dent.pct[, order(colMeans(sb.bact.dent.pct), decreasing = TRUE)])
+sb + labs(title = "Top Bacterial Species in Dentin")
+```

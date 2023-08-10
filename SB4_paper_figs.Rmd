@@ -1,0 +1,402 @@
+---
+title: "SB_4 Paper Figures"
+author: "cliffbeall"
+date: '2023-05-09'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(tidyverse)
+require(scales)
+require(readxl)
+require(vegan)
+require(car)
+require(lme4)
+require(ggcorrplot)
+require(Hmisc)
+```
+
+## 2023-05-09 Figures for Paper
+
+The purpose here is to get code for the final figures in the paper without all the other stuff.
+
+```{r load_data}
+load(file = "SB_species.Rdata")
+sb.bact.spec.counts <- sb.bact.spec.counts[order(sb.bact.spec.counts$sample), ]
+row.names(sb.bact.spec.counts) <- as.character(sb.bact.spec.counts$sample)
+sb.bact.spec.counts <- sb.bact.spec.counts[, -1]
+sb.fung.spec.counts <- sb.fung.spec.counts[order(sb.fung.spec.counts$sample), ]
+row.names(sb.fung.spec.counts) <- as.character(sb.fung.spec.counts$sample)
+sb.fung.spec.counts <- sb.fung.spec.counts[, -1]
+raw.meta <- read_xlsx(path = "Book1.xlsx", sheet = "Original Sample List",
+                      col_names = c("Subject ID", "Inclusion", "Inclusion2", "Visit Date", "Age in mos.", "Gender", "Ethnicity1",
+                                    "Ethnicity2", "Ethnicity3", "Unknown1", "Unknown2", "Teeth", "Unknown3", "Unknown4",
+                                    "Unknown5", "Comment", "Experimental group"),
+                      col_types = c("numeric", "text", "text", "date", "numeric", rep("text", 4), rep("numeric", 6), "text", "text"))
+sb.samps <- strtrim(row.names(sb.bact.spec.counts), 8)
+nameparts <- unlist(strsplit(sb.samps, split = "-"))
+subject <- factor(nameparts[seq(from = 2, to = length(nameparts) - 1, by = 3)])
+group <- character(length(subject))
+subjnum <- as.numeric(as.character(subject))
+group[subjnum >= 100 & subjnum < 200] <- "Control"
+group[subjnum >= 200 & subjnum < 300] <- "Caries"
+sample.letter <- nameparts[seq(from = 3, to = length(nameparts), by = 3)]
+sampletype <- character(length(sample.letter))
+sampletype[group == "Control"] <- "Control"
+sampletype[group == "Caries" & sample.letter == "I"] <- "Intact"
+sampletype[sample.letter == "W"] <- "White Spot"
+sampletype[sample.letter == "C"] <- "Cavitated"
+sampletype[sample.letter == "D"] <- "Dentin"
+sampletype <- factor(sampletype, levels = c("Control", "Intact", "White Spot", "Cavitated", "Dentin"), ordered = TRUE)
+age <- numeric(length(subject))
+gender <- character(length(subject))
+ethnicity <- character(length(subject))
+for(i in 1:length(subject)){
+  j <- which(raw.meta$`Subject ID` == as.numeric(as.character(subject))[i])
+  age[i] <- raw.meta$`Age in mos.`[j]
+  gender[i] <- raw.meta$Gender[j]
+  ethnicity[i] <- raw.meta$Ethnicity3[j]
+}
+sb.meta <- data.frame(Sample = strtrim(row.names(sb.bact.spec.counts), 8),
+                      Subject = subject,
+                      Group = group,
+                      "Sample Type" = sampletype,
+                      Age = age,
+                      Gender = factor(gender),
+                      Ethnicity = factor(ethnicity))
+qpcr.bact <- read_xlsx(path = "Concise_QPCR.xlsx", sheet = "Bact", range = "A2:C172", col_names = c("Sample", "DNA_conc", "qPCR"))
+qpcr.fung <- read_xlsx(path = "Concise_QPCR.xlsx", sheet = "Fung", range = "A2:C172", col_names = c("Sample", "DNA_conc", "qPCR"))
+all.qpcr <- data.frame(biosample = sub("(SB_[0-9]+_.).", "\\1", qpcr.bact$Sample),
+                       bact.prep.conc = qpcr.bact$DNA_conc,
+                       bact.qpcr = qpcr.bact$qPCR,
+                       fung.prep.conc = qpcr.fung$DNA_conc,
+                       fung.qpcr = qpcr.fung$qPCR)
+all.qpcr$Sample.Type <- sb.meta$Sample.Type
+all.qpcr$Age <- sb.meta$Age
+# Adjustment for number of teeth sampled:
+all.qpcr$bact.prep.conc[all.qpcr$Sample.Type == "Control"] <- all.qpcr$bact.prep.conc[all.qpcr$Sample.Type == "Control"] / 3
+all.qpcr$bact.qpcr[all.qpcr$Sample.Type == "Control"] <- all.qpcr$bact.qpcr[all.qpcr$Sample.Type == "Control"] / 3
+all.qpcr$fung.prep.conc[all.qpcr$Sample.Type == "Control"] <- all.qpcr$fung.prep.conc[all.qpcr$Sample.Type == "Control"] / 3
+all.qpcr$fung.qpcr[all.qpcr$Sample.Type == "Control"] <- all.qpcr$fung.qpcr[all.qpcr$Sample.Type == "Control"] / 3
+```
+
+## Figure 1 QPCR Results
+
+Plot QPCR by sample type for bacteria, fungi, and the ratio.
+
+```{r}
+fivecolors <- c("lightblue", "green", "yellow", "orange", "red")
+
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = bact.qpcr, fill = Sample.Type)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.075) +
+  labs(title = "Bacterial quantity by sample type", x = "Sample Type", y = "Pg genome equiv/ul", fill = "Sample Type") +
+  scale_fill_manual(values = fivecolors) +
+  scale_y_log10(labels = trans_format("log10", math_format(10^.x)))
+#ggsave("manuscript_files/fig1a.pdf", device = "pdf")
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = fung.qpcr, fill = Sample.Type)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.1) +
+  labs(title = "Fungal quantity by sample type", x = "Sample Type", y = "Ca genome equiv/ul", fill = "Sample Type") +
+  scale_fill_manual(values = fivecolors) +
+  scale_y_log10(labels = trans_format("log10", math_format(10^.x)))
+#ggsave("manuscript_files/fig1b.pdf", device = "pdf")
+all.qpcr <- all.qpcr %>%
+  mutate(fb.ratio = fung.qpcr / bact.qpcr)
+gm_ratios <- all.qpcr %>%
+  group_by(Sample.Type) %>%
+  summarise(gm_ratio = exp(mean(log(fb.ratio))))
+ggplot(data = all.qpcr, mapping = aes(x = Sample.Type, y = fb.ratio, fill = Sample.Type)) +
+  geom_dotplot(binaxis = "y", stackdir = "center", binwidth = 0.1) +
+  labs(title = "Ratio of Fungus to Bacteria by Sample Type", x = "Sample Type", y = "Ratio", fill = "Sample Type") +
+  scale_fill_manual(values = fivecolors) +
+  scale_y_log10(labels = trans_format("log10", math_format(10^.x))) +
+  geom_segment(aes(x = 0.7, y = gm_ratios$gm_ratio[1], xend = 1.3, yend = gm_ratios$gm_ratio[1]), color = "purple") +
+  geom_segment(aes(x = 1.7, y = gm_ratios$gm_ratio[2], xend = 2.3, yend = gm_ratios$gm_ratio[2]), color = "purple") +
+  geom_segment(aes(x = 2.7, y = gm_ratios$gm_ratio[3], xend = 3.3, yend = gm_ratios$gm_ratio[3]), color = "purple") +
+  geom_segment(aes(x = 3.7, y = gm_ratios$gm_ratio[4], xend = 4.3, yend = gm_ratios$gm_ratio[4]), color = "purple") +
+  geom_segment(aes(x = 4.7, y = gm_ratios$gm_ratio[5], xend = 5.3, yend = gm_ratios$gm_ratio[5]), color = "purple")
+#ggsave("manuscript_files/fig1c.pdf", device = "pdf")
+all.qpcr$subject <- factor(unlist(strsplit(all.qpcr$biosample, split = "_"))[seq(from = 2, to = 3 * nrow(all.qpcr), by = 3)])
+caries.qpcr <- droplevels(all.qpcr[all.qpcr$Sample.Type != "Control", ])
+
+Anova(lmer(log(fb.ratio) ~ Sample.Type + (1 | subject), data = caries.qpcr))
+```
+
+## Figure 2 NMDS plots
+
+Not totally sure about the best way to do these. I can do them incorporating the QPCR data, but that is kind of underwhelmeing for the bacteria -- it seems like NMDS1 is based on the total abundance and hides other trends. For the fungi I think it's useful to incorporate the QPCR number and generate “absolute abundance” tables by multiplying relative abundance by the qPCR result. I think I am going to just go with those 2  different methods, even though it's a bit harder to explain. Ann also was interested in having arrows to connect the centroids, so will try to do those.
+
+```{r nmds_fig_2}
+# Function to generate plots from community matrix
+plot_nmds <- function(comm_df, meta_df, title_str){
+  set.seed(3658)
+  nmds <- metaMDS(comm = comm_df, trymax = 100, autotransform = FALSE)
+  nmds_gg_tb <- cbind(meta_df, scores(nmds, display = "sites"))
+  nmds_cent <- nmds_gg_tb %>%
+    group_by(Sample.Type) %>%
+    summarise(cNMDS1 = mean(NMDS1), cNMDS2 = mean(NMDS2))
+  segment_coords <- data.frame(x1 = nmds_cent$cNMDS1[1:4],
+                               y1 = nmds_cent$cNMDS2[1:4],
+                               x2 = nmds_cent$cNMDS1[2:5],
+                               y2 = nmds_cent$cNMDS2[2:5]
+                               )
+  ggplot(data = nmds_gg_tb, aes(x = NMDS1, y = NMDS2, fill = Sample.Type)) +
+    geom_point(shape = 21) +
+    coord_fixed() +
+    stat_ellipse(aes(color = Sample.Type),
+                 show.legend = FALSE
+                 ) +
+    scale_fill_manual(values = fivecolors) +
+    scale_color_manual(values = fivecolors) +
+    labs(title = title_str, fill = "Sample Type") +
+    geom_segment(data = segment_coords[1:3,], 
+                 aes(x = x1, y = y1, xend = x2, yend = y2), 
+                 inherit.aes = FALSE
+                 ) +
+    geom_segment(data = segment_coords[4,],
+                 aes(x = x1, y = y1, xend = x2, yend = y2), 
+                 inherit.aes = FALSE, 
+                 arrow = arrow(length = unit(0.5,"cm"))
+                 )
+}
+
+sb_bact_spec_rel <- decostand(sb.bact.spec.counts, method = "total")
+sb_fung_spec_rel <- decostand(sb.fung.spec.counts, method = "total")
+sb_bact_spec_abs <- apply(X = sb_bact_spec_rel, MARGIN = 2, FUN = function(x){ x * all.qpcr$bact.qpcr })
+sb_fung_spec_abs <- apply(X = sb_fung_spec_rel, MARGIN = 2, FUN = function(x){ x * all.qpcr$fung.qpcr })
+
+plot_nmds(comm_df = sb_bact_spec_rel,
+          meta_df = sb.meta,
+          title_str = "NMDS of bacterial communities\nbased on relative abundance"
+          )
+#ggsave("manuscript_files/fig2a.pdf", device = "pdf")
+plot_nmds(comm_df = sb_bact_spec_abs,
+          meta_df = sb.meta,
+          title_str = "NMDS of bacterial communities\nbased on absolute abundance"
+          )
+ggsave("manuscript_files/fig2b.pdf", device = "pdf")
+plot_nmds(comm_df = sb_fung_spec_rel,
+          meta_df = sb.meta,
+          title_str = "NMDS of fungal communities\nbased on relative abundance"
+          )
+#ggsave("manuscript_files/fig2c.pdf", device = "pdf")
+plot_nmds(comm_df = sb_fung_spec_abs,
+          meta_df = sb.meta,
+          title_str = "NMDS of fungal communities\nbased on absolute abundance"
+          )
+#ggsave("manuscript_files/fig2d.pdf", device = "pdf")
+
+plot_nmds_b <- function(comm_df, meta_df, title_str){
+  set.seed(3658)
+  nmds <- metaMDS(comm = comm_df, trymax = 100, autotransform = FALSE)
+  nmds_gg_tb <- cbind(meta_df, scores(nmds, display = "sites"))
+  nmds_cent <- nmds_gg_tb %>%
+    group_by(Sample.Type) %>%
+    summarise(cNMDS1 = mean(NMDS1), cNMDS2 = mean(NMDS2))
+  segment_coords <- data.frame(x1 = nmds_cent$cNMDS1[1:4],
+                               y1 = nmds_cent$cNMDS2[1:4],
+                               x2 = nmds_cent$cNMDS1[2:5],
+                               y2 = nmds_cent$cNMDS2[2:5]
+                               )
+  ggplot(data = nmds_gg_tb, aes(x = NMDS1, y = NMDS2, fill = Sample.Type)) +
+    geom_point(shape = 21, size = 1.8) +
+    coord_fixed(ylim = c(-2.5, 2.5)) +
+    stat_ellipse(aes(color = Sample.Type),
+                 show.legend = FALSE
+                 ) +
+    scale_fill_manual(values = fivecolors) +
+    scale_color_manual(values = fivecolors) +
+    labs(title = title_str, fill = "Sample Type") +
+    geom_segment(data = segment_coords[1:3,], 
+                 aes(x = x1, y = y1, xend = x2, yend = y2), 
+                 inherit.aes = FALSE
+                 ) +
+    geom_segment(data = segment_coords[4,],
+                 aes(x = x1, y = y1, xend = x2, yend = y2), 
+                 inherit.aes = FALSE, 
+                 arrow = arrow(length = unit(0.5,"cm"))
+                 )
+}
+
+plot_nmds_b(comm_df = sb_bact_spec_abs,
+            meta_df = sb.meta,
+            title_str = "NMDS of bacterial communities\nbased on absolute abundance"
+            )
+ggsave("manuscript_files/fig2b.pdf", device = "pdf")
+```
+
+## Supplemental Figure Bubble Plots
+
+```{r}
+set.seed(3658)
+sb.fung.abs.mds <- metaMDS(sb_fung_spec_abs, autotransform = FALSE, trymax = 100)
+sb.fung.abs.mds.df <- cbind(sb.meta, scores(sb.fung.abs.mds, display = "sites"))
+sb.fung.abs.mds.df$C.albicans <-sb_fung_spec_abs[, which(colnames(sb_fung_spec_abs) == "Candida albicans")]
+sb.fung.abs.mds.df$C.dubliniensis <-sb_fung_spec_abs[, which(colnames(sb_fung_spec_abs) == "Candida dubliniensis")]
+sb.fung.abs.mds.df$log10.C.albicans <-log10(sb.fung.abs.mds.df$C.albicans)
+sb.fung.abs.mds.df$log10.C.dubliniensis <-log10(sb.fung.abs.mds.df$C.dubliniensis)
+ggplot(data = sb.fung.abs.mds.df, aes(x = NMDS1, y = NMDS2, fill = Sample.Type)) +
+  geom_point(pch = 21, aes(size = C.albicans)) +
+  coord_fixed() +
+  scale_fill_manual(values = fivecolors) +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nBased on qPCR-adj. Fungal Abundance", color = "Sample Type")
+#ggsave("manuscript_files/suppl_fig1a.pdf", device = "pdf")
+ggplot(data = sb.fung.abs.mds.df, aes(x = NMDS1, y = NMDS2, fill = Sample.Type)) +
+  geom_point(pch = 21, aes(size = C.dubliniensis)) +
+  coord_fixed() +
+  scale_fill_manual(values = fivecolors) +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nBased on qPCR-adj. Fungal Abundance", color = "Sample Type")
+#ggsave("manuscript_files/suppl_fig1b.pdf", device = "pdf")
+
+sb.bact.abs.nmds <- metaMDS(sb_bact_spec_abs, autotransform = FALSE, trymax = 100)
+sb.bact.abs.nmds.df <- cbind(sb.meta, scores(sb.bact.abs.nmds, display = "sites"))
+sb.bact.abs.nmds.df$S.mutans <- sb_bact_spec_abs[, which(colnames(sb_bact_spec_abs) == "Streptococcus mutans")]
+ggplot(data = sb.bact.abs.nmds.df, aes(x = NMDS1, y = NMDS2, fill = Sample.Type)) +
+  geom_point(pch = 21, aes(size = S.mutans)) +
+  coord_fixed(ylim = c(-2.5, 2.5)) +
+  scale_fill_manual(values = fivecolors) +
+  labs(title = "NMDS of Bray-Curtis Dissimilarity\nBased on qPCR-adj. Bacterial Abundance", color = "Sample Type")
+ggsave("manuscript_files/suppl_fig1c.pdf", device = "pdf")
+```
+
+## Volcano Plots
+
+Was thinking of making this the third figure
+
+```{r}
+ft_bact <- read_excel("Friedman_wilcoxon.xlsx", sheet = "Friedman tests bacteria") %>%
+  filter(mean.intact != 0 & mean.dentin != 0)
+ggplot(ft_bact, aes(x = log2(mean.dentin / mean.intact), y = - log10(p.value))) +
+  geom_point() +
+  labs(title = "Bacterial Species", x = "log2 fold change")
+#ggsave("manuscript_files/bact_volcano.pdf", device = "pdf")
+ggplot(ft_bact, aes(x = log2(mean.dentin / mean.intact), y = - log10(p.value))) +
+  geom_point() +
+  labs(title = "Bacterial Species", x = "log2 fold change") +
+  geom_text(data = subset(ft_bact, p.value < 1E-6 |  log2(mean.dentin / mean.intact) > 11),
+            vjust = 0,
+            aes(label = Species))
+
+ft_fung <- read_excel("Friedman_wilcoxon.xlsx", sheet = "Friedman tests fungi") %>%
+  filter(mean.intact != 0 & mean.dentin != 0)
+ggplot(ft_fung, aes(x = log2(mean.dentin / mean.intact), y = - log10(p.value))) +
+    geom_point() +
+    labs(title = "Fungal Species", x = "log2 fold change") +
+    geom_text(data = subset(ft_fung , p.value < 0.01),
+              hjust = 1,
+              aes(label = Species)
+              )
+ggplot(ft_fung, aes(x = log2(mean.dentin / mean.intact), y = - log10(p.value))) +
+    geom_point() +
+    labs(title = "Fungal Species", x = "log2 fold change")
+#ggsave("manuscript_files/fung_volcano.pdf", device = "pdf")
+```
+
+## Supplemental Figure: Top Bacteria/Fungi plus correlations
+
+The idea is for a three-part figure with estimated absolute abundances of bacteria and fungi for top species together with correlation plot.
+
+```{r}
+sb_bact_dent_abs <- sb_bact_spec_abs %>%
+  as.data.frame() %>%
+  filter(sb.meta$Sample.Type == "Dentin") %>%
+  rename("Veillonella parvula group" = "Veillonella atypica dispar parvula",
+         "Streptococcus mitis group" = "Streptococcus mitis pneumoniae infantis oralis",
+         "Actinomyces naeslundii group" = "Actinomyces viscosus naeslundii oris",
+         "Neisseria flava group" = "Neisseria flava mucosa pharyngis",
+         "Neisseria meningitidis group" = "Neisseria meningitidis polysaccharea"
+         )
+top_15_dent_bact <- names(sort(colMeans(sb_bact_dent_abs), decreasing = TRUE)[1:15])
+
+sb_bact_dent_abs %>%
+  select(all_of(top_15_dent_bact)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Species",
+               values_to = "Abundance") %>%
+  mutate(Species = factor(Species, levels = top_15_dent_bact)) %>%
+ggplot(mapping = aes(x = Species, y = Abundance)) +
+       geom_dotplot(binaxis = "y", binwidth = 0.1, stackdir = "center") +
+       labs(title = "Absolute Abundance in Dentin (non-zero samples)") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       scale_y_log10()
+ggsave("manuscript_files/supp2a.pdf", device = "pdf")
+sb_fung_dent_abs <- sb_fung_spec_abs %>%
+  as.data.frame() %>%
+  filter(sb.meta$Sample.Type == "Dentin")
+top_5_fung <- names(sort(colMeans(sb_fung_dent_abs), decreasing = TRUE)[1:5])
+
+sb_fung_dent_abs %>%
+  select(all_of(top_5_fung)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Species",
+               values_to = "Abundance") %>%
+  mutate(Species = factor(Species, levels = top_5_fung)) %>%
+ggplot(mapping = aes(x = Species, y = Abundance)) +
+       geom_dotplot(binaxis = "y", binwidth = 0.2, stackdir = "center") +
+       labs(title = "Absolute Abundance in Dentin (non-zero samples)") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       scale_y_log10()
+ggsave("manuscript_files/supp2b.pdf", device = "pdf")
+dent_fung5 <- sb_fung_dent_abs %>%
+  select(all_of(top_5_fung))
+
+bact_dent_top <- sb_bact_dent_abs %>%
+  select(all_of(top_15_dent_bact)) %>%
+  cbind(dent_fung5)
+
+corrabsfig <- rcorr(as.matrix(bact_dent_top), type = "spearman")
+ggcorrplot(corrabsfig$r[1:15, 16:20], p.mat = corrabsfig$P[1:15, 16:20], 
+           title = "Spearman correlation of Absolute Abundance in Dentin", tl.cex = 8, pch.cex = 3)
+ggsave("manuscript_files/supp2c.pdf", device = "pdf")
+```
+
+
+The stuff below was changed but I am keeping the code just in case:
+
+```{r eval = FALSE}
+
+top_20_dent_bact <- names(sort(colMeans(sb_bact_dent_abs), decreasing = TRUE)[1:20])
+
+sb_bact_dent_abs %>%
+  select(all_of(top_20_dent_bact)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Species",
+               values_to = "Abundance") %>%
+  mutate(Species = factor(Species, levels = top_20_dent_bact)) %>%
+ggplot(mapping = aes(x = Species, y = Abundance)) +
+       geom_dotplot(binaxis = "y", binwidth = 0.1, stackdir = "center") +
+       labs(title = "Absolute Abundance in Dentin (non-zero samples)") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       scale_y_log10()
+#ggsave("manuscript_files/supp2a.pdf", device = "pdf")
+sb_fung_dent_abs <- sb_fung_spec_abs %>%
+  as.data.frame() %>%
+  filter(sb.meta$Sample.Type == "Dentin")
+top_10_fung <- names(sort(colMeans(sb_fung_dent_abs), decreasing = TRUE)[1:10])
+
+sb_fung_dent_abs %>%
+  select(all_of(top_10_fung)) %>%
+  pivot_longer(cols = everything(),
+               names_to = "Species",
+               values_to = "Abundance") %>%
+  mutate(Species = factor(Species, levels = top_10_fung)) %>%
+ggplot(mapping = aes(x = Species, y = Abundance)) +
+       geom_dotplot(binaxis = "y", binwidth = 0.2, stackdir = "center") +
+       labs(title = "Absolute Abundance in Dentin (non-zero samples)") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       scale_y_log10()
+#ggsave("manuscript_files/supp2b.pdf", device = "pdf")
+dent_fung10 <- sb_fung_dent_abs %>%
+  select(all_of(top_10_fung))
+
+bact_dent_top <- sb_bact_dent_abs %>%
+  select(all_of(top_20_dent_bact)) %>%
+  cbind(dent_fung10)
+
+corrabsfig <- rcorr(as.matrix(bact_dent_top), type = "spearman")
+ggcorrplot(corrabsfig$r[1:20, 21:30], p.mat = corrabsfig$P[1:20, 21:30], 
+           title = "Spearman correlation of Absolute Abundance in Dentin", tl.cex = 8, pch.cex = 3)
+#ggsave("manuscript_files/supp2c.pdf", device = "pdf")
+```
+
+

@@ -1,0 +1,129 @@
+---
+title: "SB_project_1.Rmd"
+author: "cliffbeall"
+date: "10/23/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(reshape2)
+require(vegan)
+require(ggplot2)
+```
+## Overview
+
+These are samples that are various caries lesions and have had amplicon sequencing for the fungal ITS2 and the bacterial 16S V1V3.
+
+
+## Control Sample Quick Look
+
+I downloaded the sequences and ran BLAST on them last week. Below are the shell commands that I ran: 
+
+```{bash eval=FALSE}
+mv bin/bs bin/bs1.1 #old version - is now 1.2
+wget "https://api.bintray.com/content/basespace/BaseSpaceCLI-EarlyAccess-BIN/latest/\$latest/amd64-linux/bs?bt_package=latest" -O $HOME/bin/bs
+sudo chmod +x $HOME/bin/bs
+cd /Volumes/GLLab_new_share/zShared/sequence_data/MiSeq
+mkdir 2020_10_12_SB
+cd  2020_10_12_SB
+bs download project -i 202750548 -o . --extension=fastq.gz
+ls -1 | grep '^SB_..._.F' - | xargs -I {} mv -t ITS2_SEQS/ {}
+ls -1 | grep '^SB_..._.B' - | xargs -I {} mv -t BACT16S_SEQS/ {}
+cd /Volumes/GLLab_new_share/Cliff/SB_project/bact_mothur_blast
+nohup /Volumes/GriffenLeysLab/zShared/Scripts_dbs/./16s_mothur_new.sh \
+  /Volumes/GLLab_new_share/zShared/sequence_data/MiSeq/2020_10_12_SB/BACT16S_SEQS 2020_10_SB_BACT 12
+cd /Volumes/GLLab_new_share/Cliff/SB_project/fung_mothur_blast
+nohup /Volumes/GriffenLeysLab/zShared/Scripts_dbs/./ITS2_mothur_new.sh \
+  /Volumes/GLLab_new_share/zShared/sequence_data/MiSeq/2020_10_12_SB/ITS2_SEQS 2020_10_SB_FUNG 12
+# Making taxa lists:
+cd /Volumes/GLLab_new_share/Cliff/SB_project/bact_mothur_blast/blast 
+python /Volumes/GriffenLeysLab/zShared/Scripts_dbs/./sum_to_taxa4.py \
+  2020_10_SB_BACT.q28.fasta.sum \
+  /Volumes/GriffenLeysLab/zShared/Scripts_dbs/core_vag_fm_taxonomy_2020_01_06.tab \
+  ../2020_10_SB_BACT.q28.groups \
+  2020_10_SB_BACT_BLAST_TABLE.txt
+# Output:
+# Total reads:  3604431
+# Matches over 98%:  2200401
+# Percentage w. matches: % 61.0471111807
+/Volumes/GLLab_new_share/Cliff/SB_project/fung_mothur_blast/blast$ python /Volumes/GriffenLeysLab/zShared/Scripts_dbs/./sum_to_taxa4.py \
+  2020_10_SB_FUNG.q28.fasta.sum \
+  /Volumes/GriffenLeysLab/Daniel/database/Fungal_db/ISHAM_ITS_db/ISHAM_ITS.tab.tax \
+  ../2020_10_SB_FUNG.q28.groups \
+  2020_10_SB_BACT_FUNG_TABLE.txt
+# Output:
+# Total reads:  8228767
+# Matches over 98%:  5188956
+# Percentage w. matches: % 63.058730427
+```
+
+There are two somewhat disappointing indicators, one is that the percentage match is low, oftn we nave had around 80%, the other is that there are more than 2-fold more fungal than bacterial sequences. Latter is probably due to the shorter insert length leading to more efficient sequencing. Not sure what the issue is with the former.
+
+## Reading in data
+
+I will take a quick look at the controls, because we had so much problem with the previous fungal samples. Then I will try to look at what is going on with the low percent of sequences matching.
+
+```{r readblastresults}
+sb.bact.blastres <- read.table("2020_10_SB_BACT_BLAST_TABLE.txt",
+                               header = TRUE, sep = "\t", 
+                               colClasses = c("character", "character", rep("factor", 8)))
+sb.fung.blastres <- read.table("2020_10_SB_FUNG_TABLE.txt",
+                               header = TRUE, sep = "\t",
+                               colClasses = c("character", "character", rep("factor", 8)))
+```
+```{r generate_tables}
+sb.bact.spec.counts <- dcast(data = sb.bact.blastres, sample ~ Species)
+sb.fung.spec.counts <- dcast(data = sb.fung.blastres, sample ~ Species)
+sb.bact.control.counts <- sb.bact.spec.counts[172:179,]
+sb.bact.spec.counts <- sb.bact.spec.counts[1:171,]
+sb.fung.control.counts <- sb.fung.spec.counts[172:179,]
+sb.fung.spec.counts <- sb.fung.spec.counts[1:171,]
+save(sb.bact.spec.counts, sb.fung.spec.counts, file = "SB_species.Rdata")
+rm(list = c("sb.bact.blastres", "sb.fung.blastres"))
+```
+## Control analysis
+```{r}
+posbacts <- decostand(sb.bact.control.counts[5:8, -1], method = "total")
+posbacts <- posbacts[, order(colMeans(posbacts), decreasing = TRUE)]
+posbacts.plotdf <- data.frame(Samples = factor(rep(sb.bact.control.counts$sample[5:8], 12)),
+                              Species = factor(rep(colnames(posbacts)[1:12], each = 4)),
+                              Fraction = unlist(posbacts[, 1:12]))
+ggplot(data = posbacts.plotdf) +
+       geom_col(mapping = aes(x = Samples, y = Fraction, fill = Species)) +
+       labs(title = "Positive Control Bacterial Samples") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       annotate(geom = "text", x = 1:4, y = rep(1.1,4), label = rowSums(sb.bact.control.counts[5:8, -1]), angle = 90, size = 2)
+negbacts <- decostand(sb.bact.control.counts[1:4, -1], method = "total")
+negbacts <- negbacts[, order(colMeans(negbacts), decreasing = TRUE)]
+negbacts.plotdf <- data.frame(Samples = factor(rep(sb.bact.control.counts$sample[1:4], 10)),
+                              Species = factor(rep(colnames(negbacts)[1:10], each = 4)),
+                              Fraction = unlist(negbacts[, 1:10]))
+ggplot(data = negbacts.plotdf) +
+       geom_col(mapping = aes(x = Samples, y = Fraction, fill = Species)) +
+       labs(title = "Negative Control Bacterial Samples", subtitle = "Top Ten by Percentage") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       annotate(geom = "text", x = 1:4, y = rep(1.1,4), label = rowSums(sb.bact.control.counts[5:8, -1]), angle = 90, size = 2)
+posfungs <- decostand(sb.fung.control.counts[5:8, -1], method = "total")
+posfungs <- posfungs[, order(colMeans(posfungs), decreasing = TRUE)]
+posfungs.plotdf <- data.frame(Samples = factor(rep(sb.fung.control.counts$sample[5:8], 12)),
+                              Species = factor(rep(colnames(posfungs)[1:12], each = 4)),
+                              Fraction = unlist(posfungs[, 1:12]))
+ggplot(data = posfungs.plotdf) +
+       geom_col(mapping = aes(x = Samples, y = Fraction, fill = Species)) +
+       labs(title = "Positive Control Fungal Samples") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       annotate(geom = "text", x = 1:4, y = rep(1.1,4), label = rowSums(sb.fung.control.counts[5:8, -1]), angle = 90, size = 2)
+negfungs <- decostand(sb.fung.control.counts[1:4, -1], method = "total")
+negfungs <- negfungs[, order(colMeans(negfungs), decreasing = TRUE)]
+negfungs.plotdf <- data.frame(Samples = factor(rep(sb.fung.control.counts$sample[1:4], 10)),
+                              Species = factor(rep(colnames(negfungs)[1:10], each = 4)),
+                              Fraction = unlist(negfungs[, 1:10]))
+ggplot(data = negfungs.plotdf) +
+       geom_col(mapping = aes(x = Samples, y = Fraction, fill = Species)) +
+       labs(title = "Negative Control Fungal Samples", subtitle = "Top Ten by Percentage") +
+       theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1)) +
+       annotate(geom = "text", x = 1:4, y = rep(1.1,4), label = rowSums(sb.fung.control.counts[5:8, -1]), angle = 90, size = 2)
+```
+
+

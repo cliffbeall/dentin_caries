@@ -1,0 +1,117 @@
+---
+title: "BLAST followup"
+author: "cliffbeall"
+date: "11/3/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+```
+
+## BLAST follow up
+
+For the BLAST with these samples, both the fungal and bacterial samples had low rates of matches to the database, 61% for the bacterial and 63% for the fungi. One thing I wanted to look at was the distribution of best match per read, maybe that would indicate if there were just lots of wrong basecalls that are causing problems. I was looking at other runs to compare it to, the odontogenic/gastric tube had over 70% but I also seem to remember that we often got around 80%. I looked and actually we had had some runs in the 60s and analyzed them. A better run was from 7/17 - it was about 88 for fungi and 78 for bacteria.
+
+Here are shell commands that I used to tar up the sum files and download to my machine so I can have a look at them:
+```{bash sum-files, eval = FALSE}
+# on server:
+cd /Volumes/GLLab_new_share/Cliff/SB_project/bact_mothur_blast/blast/
+tar -czf bactsum.tgz 2020_10_SB_BACT.q28.fasta.sum
+cd ../../fung_mothur_blast/blast/
+tar -czf fungsum.tgz 2020_10_SB_FUNG.q28.fasta.sum
+cd /home/leyslab/RS_odont_tube/blast/
+tar -czf odontsum.tgz RS_odont.q28.fasta.sum
+cd /Volumes/GriffenLeysLab/zShared/MiSeq_runs/miseq_070617/blast/
+tar -czf bact17sum.tgz miseq_070617.q28.fasta.sum
+cd ../../miseq_070617_ITS2/blast/
+tar -czf fung17sum.tgz miseq_070617_its2.q28.fasta.sum
+# terminal on iMac
+cd ~/Box\ Sync/Cliff/SB_project
+mkdir run_comparisons
+cd run_comparisons
+scp -r leyslab@leys-Precision-T5610:/Volumes/GLLab_new_share/Cliff/SB_project/bact_mothur_blast/blast/bactsum.tgz .
+scp leyslab@leys-Precision-T5610:/Volumes/GLLab_new_share/Cliff/SB_project/fung_mothur_blast/blast/fungsum.tgz .
+scp leyslab@leys-Precision-T5610:~/RS_odont_tube/blast/odontsum.tgz .
+scp leyslab@leys-Precision-T5610:/Volumes/GriffenLeysLab/zShared/MiSeq_runs/miseq_070617/blast/bact17sum.tgz .
+scp leyslab@leys-Precision-T5610:/Volumes/GriffenLeysLab/zShared/MiSeq_runs/miseq_070617_ITS2/blast/fung17sum.tgz .
+ls -1 *.tgz | xargs -I {} tar -xzf {}
+cat 2020_10_SB_BACT.q28.fasta.sum/2020_10_SB_BACT.q28.fasta* | cut -f 3 > SB_bact_best_pids.txt
+cat 2020_10_SB_FUNG.q28.fasta.sum/2020_10_SB_FUNG.q28.fasta* | cut -f 3 > SB_fung_best_pids.txt
+cat miseq_070617.q28.fasta.sum/miseq_070617.q28.fasta* | cut -f 3 > July2017_bact_best_pids.txt
+cat miseq_070617_its2.q28.fasta.sum/miseq_070617_its2.q28.fasta* | cut -f 3 > July2017_fung_best_pids.txt
+```
+
+Pull the data into R and plot some density plots.
+
+```{r}
+SB.bact.best.pids <- scan(file = "run_comparisons/SB_bact_best_pids.txt", what = numeric())
+SB.fung.best.pids <- scan(file = "run_comparisons/SB_fung_best_pids.txt", what = numeric())
+July2017.bact.best.pids <- scan(file = "run_comparisons/July2017_bact_best_pids.txt", what = numeric())
+July2017.fung.best.pids <- scan(file = "run_comparisons/July2017_fung_best_pids.txt", what = numeric())
+run.stats <- data.frame(run = c("2020 bacterial", "2020 fungal", "2017 bacterial", "2017 fungal"),
+                        fraction.over98 = sapply(list(SB.bact.best.pids, SB.fung.best.pids, July2017.bact.best.pids, July2017.fung.best.pids), FUN = function(x){ sum(x >= 0.98) / length(x) }),
+                        fraction.nohit = sapply(list(SB.bact.best.pids, SB.fung.best.pids, July2017.bact.best.pids, July2017.fung.best.pids), FUN = function(x){ sum(x == 0.1) / length(x) }))
+densityplot.df <- data.frame(Run = factor(rep(c("2020 bacterial", "2020 fungal", "2017 bacterial", "2017 fungal"), each = 100000)),
+                             PID.best.hit = as.vector(sapply(list(SB.bact.best.pids, SB.fung.best.pids, July2017.bact.best.pids, July2017.fung.best.pids), FUN = function(x){ sample(x[x > 0.8], 100000) })))
+ggplot(densityplot.df, aes(x = PID.best.hit, color = Run)) +
+    geom_density()
+```
+From that it looks like both the bacterial runs have trailing matches that go below 95% but the new run just seems to have more. Not sure there is too much I can do about it. 
+
+## Sequencing Statistics for Paper
+
+There was verbiage in the manuscript about maximum and minimum numbers of reads and such which I didn't have. I determined the numbers of reads by modifying a python script that I used to generate a file list for mothur. It counts the number of lines in the fastq files and divides by 4 to get the reads.
+
+Here is that script:
+
+```{python eval = FALSE}
+"""This script will generate a printout with the number of sequence reads per 
+sample from a MiSeq download
+Usage: python count_reads.py <fastq directory>
+"""
+import subprocess
+import sys
+import os
+import re
+import gzip
+
+raw_output = subprocess.check_output('find {} -type f -name "*.fastq.gz" | grep -v Apple'.format(sys.argv[1]), shell = True)
+pathlist = sorted(raw_output.rstrip().split('\n'))
+
+if len(pathlist) % 2 == 0:
+        for i in range(0, len(pathlist), 2):
+            filename = os.path.basename(pathlist[i])
+            sample = re.sub("_S[0-9]*_L[0-9]*.*","", os.path.basename(pathlist[i]))
+            count = 0
+            for line in gzip.open(pathlist[i]): count += 1
+            print('\t'.join([str(sample), str(count / 4)]))
+else: 
+    print("check: uneven number of files")
+```
+
+This is the verbiage (partly filled in):
+> The MiSeq sequencing of 75 subjects generated 20.1 M paired-end reads for 171 samples and  with a minimum
+> of ___, a maximum of ____, and an average of ____ sequences. A total of __ bacterial species-level and __ 
+> fungal species-level groups were found. 
+
+```{r}
+readcounts <- read_tsv(file = "readcounts.txt",
+                       col_names = c("Sample", "Reads"),
+                       col_types = "ci"
+                       )
+load(file = "SB_species.Rdata")
+```
+
+Total 16S counts: `sum(readcounts$Reads[str_detect(readcounts$Sample, "^SB-\\d.+B$")])`
+Total ITS2 counts: `sum(readcounts$Reads[str_detect(readcounts$Sample, "^SB-\\d.+F$")])`
+Minimum 16S: `min(readcounts$Reads[str_detect(readcounts$Sample, "^SB-\\d.+B$")])`
+Minimum ITS2: `min(readcounts$Reads[str_detect(readcounts$Sample, "^SB-\\d.+F$")])`
+Maximum 16S: `max(readcounts$Reads[str_detect(readcounts$Sample, "^SB-\\d.+B$")])`
+Maximum ITS2: `max(readcounts$Reads[str_detect(readcounts$Sample, "^SB-\\d.+F$")])`
+Average 16S: `mean(readcounts$Reads[str_detect(readcounts$Sample, "^SB-\\d.+B$")])`
+Average ITS2: `mean(readcounts$Reads[str_detect(readcounts$Sample, "^SB-\\d.+F$")])`
+
+Total taxonomic id bact: `sum(colSums(sb.bact.spec.counts[, -1]))`
+Total taxonomic id fung: `sum(colSums(sb.fung.spec.counts[, -1]))`
