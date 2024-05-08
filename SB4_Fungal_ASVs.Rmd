@@ -1,0 +1,167 @@
+---
+title: "SB4 Fungal ASVs for Reviewer"
+author: "cliffbeall"
+date: "2024-03-29"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+require(tidyverse)
+library(dada2)
+packageVersion("dada2")
+library(ShortRead)
+packageVersion("ShortRead")
+library(Biostrings)
+packageVersion("Biostrings")
+```
+
+## Purpose
+
+I will run DADA2 to generate ASVs in response to a reviewer of our paper. The comment they made was:
+
+> Reviewer #1: Minor point
+> L-278 "A single fungal species was almost always dominant within an individual carious tooth;
+> co-colonizing fungi of distinct species was seldom observed." 
+For these teeth, were multiple 
+> ASVs of the same species observed? Did certain ASVs dominate? It maybe of interest to consider 
+> intra-specific variation. Considerable variation in biochemical characteristics among strains 
+> of a species may exist.
+
+## Move Fungal Sequences to Local Machine
+
+First copy the fungal sequences from the server to this machine. Logged in to the server:
+
+```{bash eval = FALSE}
+cd /Volumes/GLLab_new_share/zShared/sequence_data/MiSeq/2020_10_12_SB
+tar -czvf ITS2_SEQS.tar.gz ITS2_SEQS/
+logout
+```
+
+Next, in the Windows Command Prompt:
+
+```
+PATH=C:\Program Files\PuTTY:%PATH
+pscp -scp leyslab@140.254.150.104:/Volumes/GLLab_new_share/zShared/sequence_data/MiSeq/2020_10_12_SB/ITS2_SEQS.tar.gz C:\Users\beall.3\Downloads\
+```
+
+Then in Windows, upload to SB_project folder on OneDrive.
+
+Now in the iMac terminal:
+
+```
+cd /Users/cliffbeall/Library/CloudStorage/OneDrive-TheOhioStateUniversity/BuckeyeBox\ Data/Cliff/SB_project/
+tar -xvf ITS2_SEQS.tar.gz
+# Move all files into the folder
+find ./ITS2_SEQS/ -name "*.fastq.gz" | xargs -I {} mv {} ./ITS2_SEQS
+# Clean up by removing directories:
+find ./ITS2_SEQS/ -type d -empty | xargs -I {} rm -r {}
+```
+
+```{r}
+path <- "ITS2_SEQS"
+fnFs <- sort(list.files(path, pattern = "R1_001.fastq.gz", full.names = TRUE))
+fnRs <- sort(list.files(path, pattern = "R2_001.fastq.gz", full.names = TRUE))
+FWD <- "CGATGAAGARCGCAGC"
+REV <- "TATGCTTAAGTTCAGCGGGTA"
+```
+
+```{r results = 'hide'}
+fnFs.filtN <- file.path(path, "filtN", basename(fnFs)) # Put N-filtered files in filtN/ subdirectory
+fnRs.filtN <- file.path(path, "filtN", basename(fnRs))
+filterAndTrim(fnFs, fnFs.filtN, fnRs, fnRs.filtN, maxN = 0, multithread = TRUE)
+path.cut <- file.path(path, "cutadapt")
+if(!dir.exists(path.cut)) dir.create(path.cut)
+fnFs.cut <- file.path(path.cut, basename(fnFs))
+fnRs.cut <- file.path(path.cut, basename(fnRs))
+FWD.RC <- dada2:::rc(FWD)
+REV.RC <- dada2:::rc(REV)
+# Trim FWD and the reverse-complement of REV off of R1 (forward reads)
+R1.flags <- paste("-g", FWD, "-a", REV.RC) 
+# Trim REV and the reverse-complement of FWD off of R2 (reverse reads)
+R2.flags <- paste("-G", REV, "-A", FWD.RC) 
+# Run Cutadapt
+
+for(i in seq_along(fnFs)) {
+  system2("cutadapt", args = c(R1.flags, R2.flags, "-n", 2, # -n 2 required to remove FWD and REV from reads
+                             "-o", fnFs.cut[i], "-p", fnRs.cut[i], # output files
+                             fnFs.filtN[i], fnRs.filtN[i])) # input files
+}
+```
+```{r}
+# Remove samples with zero bases after cutadapt
+path.filt2 <- file.path(path, "filt2")
+fnFs.filt2 <- file.path(path, "filt2", basename(fnFs))
+fnRs.filt2 <- file.path(path, "filt2", basename(fnRs))
+if(!dir.exists(path.filt2)) dir.create(path.filt2)
+out <- filterAndTrim(fnFs.cut, fnFs.filt2, fnRs.cut, fnRs.filt2, truncLen=0,
+                     maxN=0, maxEE=10, rm.phix=TRUE, minLen = 50,
+                     compress=TRUE, multithread=TRUE)
+# Forward and reverse fastq filenames have the format:
+filt2Fs <- sort(list.files(path.filt2, pattern = "R1_001.fastq.gz", full.names = TRUE))
+filt2Rs <- sort(list.files(path.filt2, pattern = "R2_001.fastq.gz", full.names = TRUE))
+
+# Extract sample names, assuming filenames have format:
+get.sample.name <- function(fname) strsplit(basename(fname), "_")[[1]][1]
+sample.names <- unname(sapply(filt2Fs, get.sample.name))
+plotQualityProfile(filt2Fs[1:2])
+plotQualityProfile(filt2Rs[1:2])
+```
+
+Now on to the rest of the DADA2 pipeline:
+
+```{r}
+errF <- learnErrors(filt2Fs, multithread = TRUE)
+errR <- learnErrors(filt2Rs, multithread = TRUE)
+plotErrors(errF, nominalQ = TRUE)
+```
+
+```{r}
+dadaFs <- dada(filt2Fs, err = errF, multithread = TRUE)
+dadaRs <- dada(filt2Rs, err = errR, multithread = TRUE)
+mergers <- mergePairs(dadaFs, filt2Fs, dadaRs, filt2Rs, verbose=TRUE)
+seqtab <- makeSequenceTable(mergers)
+dim(seqtab)
+seqtab.nochim <- removeBimeraDenovo(seqtab, method="consensus", multithread=TRUE, verbose=TRUE)
+table(nchar(getSequences(seqtab.nochim)))
+```
+
+Identify the ASVs:
+
+```{r}
+unite.ref <- "UNITE_db/sh_general_release_dynamic_all_25.07.2023.fasta"
+taxa <- assignTaxonomy(seqtab.nochim, unite.ref, multithread = TRUE, tryRC = TRUE)
+taxa.print <- taxa  # Removing sequence rownames for display only
+rownames(taxa.print) <- NULL
+head(taxa.print)
+save(taxa, seqtab.nochim, file = "fungus_dada_results.Rdata")
+```
+Eyeballing it looks like for C. albicans, one ASV is dominant and it is the one that is in our positive control. There are some minor ASVs. There are minor ASVs also in the positive control samples. Do some calculations of the numbers. Note that I checked and all species albicans and dubliniensis are Candida.
+
+## Summary Stats
+
+```{r}
+cont <- str_detect(rownames(seqtab.nochim), "NEG|POS")
+pos <- str_detect(rownames(seqtab.nochim), "POS")
+ca <- which(taxa.print[, "Species"] == "s__albicans")
+cd <- which(taxa.print[, "Species"] == "s__dubliniensis")
+tot_ca_exp <-sum(colSums(seqtab.nochim[!cont, ca]) > 0)
+tot_ca_pos <-sum(colSums(seqtab.nochim[pos, ca]) > 0)
+pct_ca_dom_exp <- sum(seqtab.nochim[!cont, 1]) / sum(seqtab.nochim[!cont, ca]) * 100
+pct_ca_dom_pos <- sum(seqtab.nochim[pos, 1]) / sum(seqtab.nochim[pos, ca]) * 100
+tot_cd_exp <-sum(colSums(seqtab.nochim[!cont, cd]) > 0)
+pct_cd_dom_exp <- sum(seqtab.nochim[!cont, 2]) / sum(seqtab.nochim[!cont, cd]) * 100
+```
+
+Candida albicans:
+
+* `r tot_ca_exp` ASVs found in the experimental samples
+* The predominant ASV was `r pct_ca_dom_exp` percent of total sequences in the experimental samples
+* `r tot_ca_pos` ASVs found in the 4 positive control samples 
+* The predominant ASV was `r pct_ca_dom_pos` percent of total sequences in the positive controls
+
+Candida dubliniensis: 
+
+* Was not included in the positive control
+* `r tot_cd_exp` ASVs found in the experimental samples
+* The predominant ASV was `r pct_cd_dom_exp` percent of total sequences in the experimental samples
